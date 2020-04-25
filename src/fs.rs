@@ -30,14 +30,16 @@ pub struct Filesystem {
 
 struct FilesystemInner {
     onedrive: OneDrive,
+    client: reqwest::Client,
     uid: u32,
     gid: u32,
 
     ino_counter: AtomicU64,
     ino_id_map: Mutex<InoIdMap>,
 
-    dir_fh_counter: AtomicU64,
+    fh_counter: AtomicU64,
     dir_content_map: Mutex<HashMap<u64, Vec<DirEntry>>>,
+    file_download_url_map: Mutex<HashMap<u64, String>>,
 }
 
 #[derive(Default)]
@@ -62,12 +64,14 @@ impl Filesystem {
         Self {
             inner: Arc::new(FilesystemInner {
                 onedrive,
+                client: reqwest::Client::new(),
                 uid,
                 gid,
                 ino_counter: 2.into(), // Skip FUSE_ROOT_ID.
                 ino_id_map: Default::default(),
-                dir_fh_counter: 1.into(),
+                fh_counter: 1.into(),
                 dir_content_map: Default::default(),
+                file_download_url_map: Default::default(),
             }),
         }
     }
@@ -188,13 +192,48 @@ impl FilesystemInner {
             buf.push(DirEntry { ino, kind, name });
         }
 
-        let fh = self.dir_fh_counter.fetch_add(1, Ordering::Relaxed);
+        let fh = self.fh_counter.fetch_add(1, Ordering::Relaxed);
         self.dir_content_map.lock().await.insert(fh, buf);
         fh
     }
 
     async fn free_dir_content(&self, fh: u64) {
         self.dir_content_map.lock().await.remove(&fh);
+    }
+
+    async fn alloc_file_download_url(&self, url: String) -> u64 {
+        let fh = self.fh_counter.fetch_add(1, Ordering::Relaxed);
+        self.file_download_url_map.lock().await.insert(fh, url);
+        fh
+    }
+
+    async fn free_file_download_url(&self, fh: u64) {
+        self.file_download_url_map.lock().await.remove(&fh);
+    }
+
+    async fn read_file(&self, fh: u64, offset: u64, size: u32) -> anyhow::Result<bytes::Bytes> {
+        use anyhow::{ensure, Context as _};
+
+        let begin = offset;
+        let end = offset
+            .checked_add(u64::from(size))
+            .and_then(|x| x.checked_add(1))
+            .context("End offset overflow")?;
+
+        let url = self.file_download_url_map.lock().await[&fh].clone();
+        let resp = self
+            .client
+            .get(&url)
+            .header(http::header::RANGE, format!("bytes={}-{}", begin, end))
+            .send()
+            .await?;
+        ensure!(
+            resp.status() == StatusCode::PARTIAL_CONTENT,
+            "HTTP error: {}",
+            resp.status(),
+        );
+
+        Ok(resp.bytes().await?)
     }
 }
 
@@ -466,6 +505,79 @@ impl fuse::Filesystem for Filesystem {
         reply: ReplyEmpty,
     ) {
         reply.ok();
+    }
+
+    fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+        debug!("open: #{} flags={}", ino, flags);
+
+        if (flags & libc::O_CREAT as u32) != 0
+            || (flags & libc::O_WRONLY as u32) != 0
+            || (flags & libc::O_RDWR as u32) != 0
+        {
+            return reply.error(libc::EPERM);
+        }
+
+        self.spawn(|inner| async move {
+            let item_id;
+            let loc = if ino == FUSE_ROOT_ID {
+                ItemLocation::root()
+            } else {
+                item_id = inner.get_item_id(ino).await.unwrap();
+                ItemLocation::from_id(&item_id)
+            };
+
+            let download_url = match inner.onedrive.get_item_download_url(loc).await {
+                Ok(url) => url,
+                Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
+                    return reply.error(libc::ENOENT);
+                }
+                Err(err) => {
+                    error!("open: {}", err);
+                    return reply.error(libc::EIO);
+                }
+            };
+
+            let fh = inner.alloc_file_download_url(download_url).await;
+            reply.opened(fh, libc::O_RDONLY as u32);
+        });
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        reply: ReplyData,
+    ) {
+        debug!("read #{} fh={} offset={} size={}", ino, fh, offset, size);
+        self.spawn(|inner| async move {
+            match inner.read_file(fh, offset as u64, size).await {
+                Ok(data) => reply.data(&*data),
+                Err(err) => {
+                    error!("read: {}", err);
+                    reply.error(libc::EIO);
+                }
+            }
+        });
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        _flags: u32,
+        _lock_owner: u64,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        debug!("release #{} fh={}", ino, fh);
+        self.spawn(|inner| async move {
+            inner.free_file_download_url(fh).await;
+            reply.ok();
+        });
     }
 }
 
