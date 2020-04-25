@@ -628,6 +628,55 @@ impl fuse::Filesystem for Filesystem {
     fn readlink(&mut self, _req: &Request, _ino: u64, reply: ReplyData) {
         reply.error(libc::EPERM);
     }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        new_parent: u64,
+        new_name: &OsStr,
+        reply: ReplyEmpty,
+    ) {
+        use onedrive_api::{option::DriveItemPutOption, ConflictBehavior};
+
+        debug!(
+            "rename #{}/{} -> #{}/{}",
+            parent,
+            name.to_string_lossy(),
+            new_parent,
+            new_name.to_string_lossy(),
+        );
+
+        let name = name.to_owned();
+        let new_name = new_name.to_owned();
+        self.spawn(|inner| async move {
+            item_loc!(loc = #parent / name; inner, reply);
+            item_loc!(new_parent = #new_parent; inner, reply);
+            cvt_name!(new_name; reply);
+
+            match inner
+                .onedrive
+                .move_with_option(
+                    loc,
+                    new_parent,
+                    Some(new_name),
+                    DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Fail),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
+                    return reply.error(libc::ENOENT);
+                }
+                Err(err) => {
+                    error!("rename: {}", err);
+                    return reply.error(libc::EIO);
+                }
+            }
+            reply.ok();
+        });
+    }
 }
 
 fn cvt_name(s: &OsStr) -> Option<&FileName> {
