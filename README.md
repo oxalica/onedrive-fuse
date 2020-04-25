@@ -60,3 +60,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
   - [ ] Directory tree cache
   - [ ] Read cache
   - [ ] Write cache
+
+## License
+
+GPL-3.0

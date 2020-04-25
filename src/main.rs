@@ -57,9 +57,18 @@ fn parse_args() -> Result<Args> {
 }
 
 fn print_help() {
-    eprintln!(
-        "USAGE: {} <config_file> <mount_point>",
-        std::env::args().next().unwrap(),
+    eprint!(
+        r"
+USAGE: {exe_name} <config_file> <mount_point>
+
+Mount OneDrive storage as FUSE filesystem.
+
+Copyright (C) 2019 {authors}
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+",
+        authors = env!("CARGO_PKG_AUTHORS"),
+        exe_name = std::env::args().next().unwrap(),
     );
 }
 
