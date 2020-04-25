@@ -61,7 +61,7 @@ impl Filesystem {
 }
 
 impl FilesystemInner {
-    async fn get_ino(&self, ino: u64) -> Option<ItemId> {
+    async fn get_item_id(&self, ino: u64) -> Option<ItemId> {
         self.ino_id_map
             .lock()
             .await
@@ -202,16 +202,25 @@ impl fuse::Filesystem for Filesystem {
 
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup #{}/{}", parent, name.to_string_lossy());
-        let path = match cvt_name(name) {
-            None => return reply.error(libc::ENOENT),
-            Some(name) if parent == FUSE_ROOT_ID => format!("/{}", name.as_str()),
-            // TODO
-            Some(_name) => return reply.error(libc::ENOSYS),
-        };
+
+        let name = name.to_owned();
         self.spawn(|inner| async move {
             use resource::DriveItemField;
 
-            let loc = ItemLocation::from_path(&path).unwrap();
+            let path;
+            let parent_item_id;
+            let loc = match cvt_name(&name) {
+                None => return reply.error(libc::ENOENT),
+                Some(name) if parent == FUSE_ROOT_ID => {
+                    path = format!("/{}", name.as_str());
+                    ItemLocation::from_path(&path).unwrap()
+                }
+                Some(name) => {
+                    parent_item_id = inner.get_item_id(parent).await.unwrap();
+                    ItemLocation::child_of_id(&parent_item_id, name)
+                }
+            };
+
             let item = match inner
                 .onedrive
                 .get_item_with_option(loc, inner.item_attr_option().select(&[DriveItemField::id]))
@@ -223,8 +232,7 @@ impl fuse::Filesystem for Filesystem {
                 }
                 Err(err) => {
                     error!("lookup: {}", err);
-                    reply.error(libc::EIO);
-                    return;
+                    return reply.error(libc::EIO);
                 }
             };
 
@@ -249,10 +257,7 @@ impl fuse::Filesystem for Filesystem {
             let loc = if ino == FUSE_ROOT_ID {
                 ItemLocation::root()
             } else {
-                item_id = match inner.get_ino(ino).await {
-                    Some(item_id) => item_id,
-                    None => return reply.error(libc::ENOENT),
-                };
+                item_id = inner.get_item_id(ino).await.unwrap();
                 ItemLocation::from_id(&item_id)
             };
 
@@ -280,7 +285,9 @@ fn cvt_name(s: &OsStr) -> Option<&FileName> {
 }
 
 fn cvt_time(time: &str) -> Timespec {
+    // FIXME
     time::strptime(time, "%Y-%m-%dT%H:%M:%S.%f%z")
+        .or_else(|_| time::strptime(time, "%Y-%m-%dT%H:%M:%S%z"))
         .unwrap_or_else(|err| panic!("Invalid time '{}': {}", time, err))
         .to_timespec()
 }
