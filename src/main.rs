@@ -1,4 +1,5 @@
 use anyhow::{Context as _, Result};
+use nix::unistd::{getgid, getuid};
 use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -33,8 +34,9 @@ async fn main() -> Result<()> {
         .await?;
     let onedrive = OneDrive::new(tokens.access_token, DriveLocation::me());
 
-    let fs = fs::OneDriveFilesystem::new(onedrive);
-    fuse::mount(fs, &args.mount_point, &[])?;
+    let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
+    let fs = fs::Filesystem::new(onedrive, uid, gid);
+    tokio::task::spawn_blocking(move || fuse::mount(fs, &args.mount_point, &[])).await??;
     Ok(())
 }
 
