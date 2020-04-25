@@ -1,6 +1,6 @@
 [package]
 name = "onedrive-fuse"
-version = "0.0.0"
+version = "0.1.0"
 authors = ["oxalica <oxalicc@pm.me>"]
 edition = "2018"
 repository = "https://github.com/oxalica/onedrive-fuse"
