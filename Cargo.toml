@@ -3,6 +3,10 @@ name = "onedrive-fuse"
 version = "0.0.0"
 authors = ["oxalica <oxalicc@pm.me>"]
 edition = "2018"
+repository = "https://github.com/oxalica/onedrive-fuse"
+keywords = ["onedrive", "fuse"]
+description = "Mount OneDrive storage as FUSE filesystem"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -7,6 +7,7 @@ use onedrive_api::{
     resource, FileName, ItemId, ItemLocation, OneDrive,
 };
 use std::{
+    // FIXME: Concurrent map
     collections::hash_map::{Entry, HashMap},
     ffi::{OsStr, OsString},
     sync::{
@@ -237,6 +238,7 @@ impl FilesystemInner {
     }
 }
 
+// FIXME: Owned version of `FileName`.
 macro_rules! cvt_name {
     ($name:ident; $reply:expr) => {
         let $name = match cvt_name(&$name) {
@@ -246,6 +248,7 @@ macro_rules! cvt_name {
     };
 }
 
+// FIXME: Owned version of `ItemLocation`.
 macro_rules! item_loc {
     ($loc:ident = #$parent:ident; $inner:expr, $reply:expr) => {
         let item_id;
@@ -450,6 +453,8 @@ impl fuse::Filesystem for Filesystem {
                     return reply.error(libc::EIO);
                 }
             };
+
+            // FIXME: Slow. Large memory cost.
             let items = match fetcher.fetch_all(&inner.onedrive).await {
                 Ok(items) => items,
                 Err(err) => {
