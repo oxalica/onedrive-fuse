@@ -237,6 +237,39 @@ impl FilesystemInner {
     }
 }
 
+macro_rules! cvt_name {
+    ($name:ident; $reply:expr) => {
+        let $name = match cvt_name(&$name) {
+            Some(name) => name,
+            None => return $reply.error(libc::ENOENT),
+        };
+    };
+}
+
+macro_rules! item_loc {
+    ($loc:ident = #$parent:ident; $inner:expr, $reply:expr) => {
+        let item_id;
+        let $loc = if $parent == FUSE_ROOT_ID {
+            ItemLocation::root()
+        } else {
+            item_id = $inner.get_item_id($parent).await.unwrap();
+            ItemLocation::from_id(&item_id)
+        };
+    };
+    ($loc:ident = #$parent:ident / $name:ident; $inner:expr, $reply:expr) => {
+        cvt_name!($name; $reply);
+        let path;
+        let parent_item_id;
+        let $loc = if $parent == FUSE_ROOT_ID {
+            path = format!("/{}", $name.as_str());
+            ItemLocation::from_path(&path).unwrap()
+        } else {
+            parent_item_id = $inner.get_item_id($parent).await.unwrap();
+            ItemLocation::child_of_id(&parent_item_id, $name)
+        };
+    };
+}
+
 impl fuse::Filesystem for Filesystem {
     fn init(&mut self, _req: &Request) -> Result<(), c_int> {
         info!("initialize");
@@ -298,19 +331,7 @@ impl fuse::Filesystem for Filesystem {
         self.spawn(|inner| async move {
             use resource::DriveItemField;
 
-            let path;
-            let parent_item_id;
-            let loc = match cvt_name(&name) {
-                None => return reply.error(libc::ENOENT),
-                Some(name) if parent == FUSE_ROOT_ID => {
-                    path = format!("/{}", name.as_str());
-                    ItemLocation::from_path(&path).unwrap()
-                }
-                Some(name) => {
-                    parent_item_id = inner.get_item_id(parent).await.unwrap();
-                    ItemLocation::child_of_id(&parent_item_id, name)
-                }
-            };
+            item_loc!(loc = #parent / name; inner, reply);
 
             let item = match inner
                 .onedrive
@@ -349,13 +370,7 @@ impl fuse::Filesystem for Filesystem {
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         debug!("getattr #{}", ino);
         self.spawn(move |inner| async move {
-            let item_id;
-            let loc = if ino == FUSE_ROOT_ID {
-                ItemLocation::root()
-            } else {
-                item_id = inner.get_item_id(ino).await.unwrap();
-                ItemLocation::from_id(&item_id)
-            };
+            item_loc!(loc = #ino; inner, reply);
 
             let item = match inner
                 .onedrive
@@ -381,17 +396,8 @@ impl fuse::Filesystem for Filesystem {
 
         let name = name.to_owned();
         self.spawn(|inner| async move {
-            let name = match cvt_name(&name) {
-                Some(name) => name,
-                None => return reply.error(libc::EINVAL),
-            };
-            let parent_item_id;
-            let parent_loc = if parent == FUSE_ROOT_ID {
-                ItemLocation::root()
-            } else {
-                parent_item_id = inner.get_item_id(parent).await.unwrap();
-                ItemLocation::from_id(&parent_item_id)
-            };
+            cvt_name!(name; reply);
+            item_loc!(parent_loc = #parent; inner, reply);
 
             let ret_item = match inner
                 .onedrive
@@ -425,13 +431,7 @@ impl fuse::Filesystem for Filesystem {
     fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         debug!("opendir: #{} flags={}", ino, flags);
         self.spawn(|inner| async move {
-            let item_id;
-            let loc = if ino == FUSE_ROOT_ID {
-                ItemLocation::root()
-            } else {
-                item_id = inner.get_item_id(ino).await.unwrap();
-                ItemLocation::from_id(&item_id)
-            };
+            item_loc!(loc = #ino; inner, reply);
 
             let fetcher = match inner
                 .onedrive
@@ -518,13 +518,7 @@ impl fuse::Filesystem for Filesystem {
         }
 
         self.spawn(|inner| async move {
-            let item_id;
-            let loc = if ino == FUSE_ROOT_ID {
-                ItemLocation::root()
-            } else {
-                item_id = inner.get_item_id(ino).await.unwrap();
-                ItemLocation::from_id(&item_id)
-            };
+            item_loc!(loc = #ino; inner, reply);
 
             let download_url = match inner.onedrive.get_item_download_url(loc).await {
                 Ok(url) => url,
@@ -584,20 +578,7 @@ impl fuse::Filesystem for Filesystem {
         debug!("unlink #{}/{}", parent, name.to_string_lossy());
         let name = name.to_owned();
         self.spawn(|inner| async move {
-            let name = match cvt_name(&name) {
-                Some(name) => name,
-                None => return reply.error(libc::ENOENT),
-            };
-
-            let path;
-            let parent_item_id;
-            let loc = if parent == FUSE_ROOT_ID {
-                path = format!("/{}", name.as_str());
-                ItemLocation::from_path(&path).unwrap()
-            } else {
-                parent_item_id = inner.get_item_id(parent).await.unwrap();
-                ItemLocation::child_of_id(&parent_item_id, name)
-            };
+            item_loc!(loc = #parent / name; inner, reply);
 
             match inner.onedrive.delete(loc).await {
                 Ok(()) => {}
