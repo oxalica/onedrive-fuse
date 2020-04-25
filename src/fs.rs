@@ -579,6 +579,44 @@ impl fuse::Filesystem for Filesystem {
             reply.ok();
         });
     }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        debug!("unlink #{}/{}", parent, name.to_string_lossy());
+        let name = name.to_owned();
+        self.spawn(|inner| async move {
+            let name = match cvt_name(&name) {
+                Some(name) => name,
+                None => return reply.error(libc::ENOENT),
+            };
+
+            let path;
+            let parent_item_id;
+            let loc = if parent == FUSE_ROOT_ID {
+                path = format!("/{}", name.as_str());
+                ItemLocation::from_path(&path).unwrap()
+            } else {
+                parent_item_id = inner.get_item_id(parent).await.unwrap();
+                ItemLocation::child_of_id(&parent_item_id, name)
+            };
+
+            match inner.onedrive.delete(loc).await {
+                Ok(()) => {}
+                Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
+                    return reply.error(libc::ENOENT)
+                }
+                Err(err) => {
+                    error!("unlink: {}", err);
+                    return reply.error(libc::EIO);
+                }
+            }
+
+            reply.ok();
+        })
+    }
+
+    fn rmdir(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        self.unlink(req, parent, name, reply);
+    }
 }
 
 fn cvt_name(s: &OsStr) -> Option<&FileName> {
