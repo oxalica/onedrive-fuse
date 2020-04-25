@@ -2,10 +2,13 @@ use fuse::*;
 use http::StatusCode;
 use libc::c_int;
 use log::*;
-use onedrive_api::{option::ObjectOption, resource, FileName, ItemId, ItemLocation, OneDrive};
+use onedrive_api::{
+    option::{CollectionOption, ObjectOption},
+    resource, FileName, ItemId, ItemLocation, OneDrive,
+};
 use std::{
     collections::hash_map::{Entry, HashMap},
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -32,6 +35,9 @@ struct FilesystemInner {
 
     ino_counter: AtomicU64,
     ino_id_map: Mutex<InoIdMap>,
+
+    dir_fh_counter: AtomicU64,
+    dir_content_map: Mutex<HashMap<u64, Vec<DirEntry>>>,
 }
 
 #[derive(Default)]
@@ -45,6 +51,12 @@ struct InoIdMapData {
     item_id: ItemId,
 }
 
+struct DirEntry {
+    ino: u64,
+    kind: FileType,
+    name: OsString,
+}
+
 impl Filesystem {
     pub fn new(onedrive: OneDrive, uid: u32, gid: u32) -> Self {
         Self {
@@ -54,6 +66,8 @@ impl Filesystem {
                 gid,
                 ino_counter: 2.into(), // Skip FUSE_ROOT_ID.
                 ino_id_map: Default::default(),
+                dir_fh_counter: 1.into(),
+                dir_content_map: Default::default(),
             }),
         }
     }
@@ -151,6 +165,36 @@ impl FilesystemInner {
             rdev: 0,
             flags: 0,
         }
+    }
+
+    fn dir_entry_fields(&self) -> &'static [resource::DriveItemField] {
+        use resource::DriveItemField;
+        &[
+            DriveItemField::id,
+            DriveItemField::folder,
+            DriveItemField::name,
+        ]
+    }
+
+    async fn alloc_dir_content(&self, items: Vec<resource::DriveItem>) -> u64 {
+        let mut buf = Vec::with_capacity(items.len());
+        for item in items {
+            let ino = self.get_or_alloc_ino(item.id.unwrap()).await;
+            let kind = match item.folder {
+                Some(_) => FileType::Directory,
+                None => FileType::RegularFile,
+            };
+            let name = item.name.unwrap().into();
+            buf.push(DirEntry { ino, kind, name });
+        }
+
+        let fh = self.dir_fh_counter.fetch_add(1, Ordering::Relaxed);
+        self.dir_content_map.lock().await.insert(fh, buf);
+        fh
+    }
+
+    async fn free_dir_content(&self, fh: u64) {
+        self.dir_content_map.lock().await.remove(&fh);
     }
 }
 
@@ -337,6 +381,91 @@ impl fuse::Filesystem for Filesystem {
             let ttl = Timespec::new(0, 0);
             reply.entry(&ttl, &attr, GENERATION);
         });
+    }
+
+    fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+        debug!("opendir: #{} flags={}", ino, flags);
+        self.spawn(|inner| async move {
+            let item_id;
+            let loc = if ino == FUSE_ROOT_ID {
+                ItemLocation::root()
+            } else {
+                item_id = inner.get_item_id(ino).await.unwrap();
+                ItemLocation::from_id(&item_id)
+            };
+
+            let fetcher = match inner
+                .onedrive
+                .list_children_with_option(
+                    loc,
+                    CollectionOption::new().select(inner.dir_entry_fields()),
+                )
+                .await
+            {
+                Ok(fetcher) => fetcher.unwrap(),
+                Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
+                    return reply.error(libc::ENOENT);
+                }
+                Err(err) => {
+                    error!("opendir: {}", err);
+                    return reply.error(libc::EIO);
+                }
+            };
+            let items = match fetcher.fetch_all(&inner.onedrive).await {
+                Ok(items) => items,
+                Err(err) => {
+                    error!("opendir: {}", err);
+                    return reply.error(libc::EIO);
+                }
+            };
+
+            let fh = inner.alloc_dir_content(items).await;
+            reply.opened(fh, 0);
+        });
+    }
+
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        debug!("readdir: #{} fh={} offset={}", ino, fh, offset);
+        self.spawn(|inner| async move {
+            let mut cnt = 0usize;
+            for (idx, ent) in inner.dir_content_map.lock().await[&fh][offset as usize..]
+                .iter()
+                .enumerate()
+            {
+                if reply.add(ent.ino, 1 + idx as i64, ent.kind, &ent.name) {
+                    break;
+                }
+                cnt += 1;
+            }
+            debug!("readdir: feed {} entries", cnt);
+            reply.ok();
+        });
+    }
+
+    fn releasedir(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, reply: ReplyEmpty) {
+        debug!("releasedir: #{}", ino);
+        self.spawn(|inner| async move {
+            inner.free_dir_content(fh).await;
+            reply.ok();
+        });
+    }
+
+    fn fsyncdir(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        _fh: u64,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        reply.ok();
     }
 }
 
