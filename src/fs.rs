@@ -6,7 +6,10 @@ use onedrive_api::{option::ObjectOption, resource, FileName, ItemId, ItemLocatio
 use std::{
     collections::hash_map::{Entry, HashMap},
     ffi::OsStr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use time::Timespec;
 use tokio::sync::Mutex;
@@ -16,6 +19,8 @@ const BLOCK_SIZE: u32 = 512;
 const FRAGMENT_SIZE: u32 = 512;
 const NAME_LEN: u32 = 2048;
 
+static_assertions::const_assert_eq!(FUSE_ROOT_ID, 1);
+
 pub struct Filesystem {
     inner: Arc<FilesystemInner>,
 }
@@ -24,6 +29,8 @@ struct FilesystemInner {
     onedrive: OneDrive,
     uid: u32,
     gid: u32,
+
+    ino_counter: AtomicU64,
     ino_id_map: Mutex<InoIdMap>,
 }
 
@@ -45,6 +52,7 @@ impl Filesystem {
                 onedrive,
                 uid,
                 gid,
+                ino_counter: 2.into(), // Skip FUSE_ROOT_ID.
                 ino_id_map: Default::default(),
             }),
         }
@@ -80,7 +88,7 @@ impl FilesystemInner {
                 ino
             }
             Entry::Vacant(ent) => {
-                let ino = g.map.len() as u64 + 2; // Starts at 2.
+                let ino = self.ino_counter.fetch_add(1, Ordering::Relaxed);
                 debug!("alloc new ino #{} -> {}", ino, item_id.as_str());
                 ent.insert(ino);
                 g.map.insert(ino, InoIdMapData { item_id, refs: 1 });
@@ -105,14 +113,14 @@ impl FilesystemInner {
         g.rev_map.remove(&item_id).unwrap();
     }
 
-    fn item_attr_option(&self) -> ObjectOption<resource::DriveItemField> {
+    fn item_attr_fields(&self) -> &'static [resource::DriveItemField] {
         use resource::DriveItemField;
-        ObjectOption::new().select(&[
+        &[
             DriveItemField::folder,
             DriveItemField::size,
             DriveItemField::created_date_time,
             DriveItemField::last_modified_date_time,
-        ])
+        ]
     }
 
     fn parse_item_attr(&self, ino: u64, item: &resource::DriveItem) -> FileAttr {
@@ -223,7 +231,12 @@ impl fuse::Filesystem for Filesystem {
 
             let item = match inner
                 .onedrive
-                .get_item_with_option(loc, inner.item_attr_option().select(&[DriveItemField::id]))
+                .get_item_with_option(
+                    loc,
+                    ObjectOption::new()
+                        .select(inner.item_attr_fields())
+                        .select(&[DriveItemField::id]),
+                )
                 .await
             {
                 Ok(item) => item.unwrap(),
@@ -263,7 +276,7 @@ impl fuse::Filesystem for Filesystem {
 
             let item = match inner
                 .onedrive
-                .get_item_with_option(loc, inner.item_attr_option())
+                .get_item_with_option(loc, ObjectOption::new().select(inner.item_attr_fields()))
                 .await
             {
                 Ok(item) => item.unwrap(),
