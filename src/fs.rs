@@ -278,6 +278,53 @@ impl fuse::Filesystem for Filesystem {
             reply.attr(&ttl, &attr);
         });
     }
+
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, reply: ReplyEntry) {
+        use onedrive_api::{option::DriveItemPutOption, ConflictBehavior};
+        debug!("mkdir #{}/{}", parent, name.to_string_lossy());
+
+        let name = name.to_owned();
+        self.spawn(|inner| async move {
+            let name = match cvt_name(&name) {
+                Some(name) => name,
+                None => return reply.error(libc::EINVAL),
+            };
+            let parent_item_id;
+            let parent_loc = if parent == FUSE_ROOT_ID {
+                ItemLocation::root()
+            } else {
+                parent_item_id = inner.get_item_id(parent).await.unwrap();
+                ItemLocation::from_id(&parent_item_id)
+            };
+
+            let ret_item = match inner
+                .onedrive
+                .create_folder_with_option(
+                    parent_loc,
+                    name,
+                    DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Fail),
+                )
+                .await
+            {
+                Ok(item) => item,
+                Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
+                    return reply.error(libc::ENOENT)
+                }
+                Err(err) if err.status_code() == Some(StatusCode::CONFLICT) => {
+                    return reply.error(libc::EEXIST)
+                }
+                Err(err) => {
+                    error!("mkdir: {}", err);
+                    return reply.error(libc::EIO);
+                }
+            };
+
+            let mut attr = inner.parse_item_attr(0, &ret_item);
+            attr.ino = inner.get_or_alloc_ino(ret_item.id.unwrap()).await;
+            let ttl = Timespec::new(0, 0);
+            reply.entry(&ttl, &attr, GENERATION);
+        });
+    }
 }
 
 fn cvt_name(s: &OsStr) -> Option<&FileName> {
