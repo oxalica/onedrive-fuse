@@ -162,7 +162,7 @@ impl FilesystemInner {
             ctime,
             crtime,
             kind,
-            perm: 0o755,
+            perm: 0o777,
             nlink: 1,
             uid: self.uid,
             gid: self.gid,
@@ -616,6 +616,36 @@ impl fuse::Filesystem for Filesystem {
 
     fn rmdir(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         self.unlink(req, parent, name, reply);
+    }
+
+    fn access(&mut self, _req: &Request, _ino: u64, _mask: u32, reply: ReplyEmpty) {
+        reply.ok();
+    }
+
+    fn link(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        _newparent: u64,
+        _newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        reply.error(libc::EPERM);
+    }
+
+    fn symlink(
+        &mut self,
+        _req: &Request,
+        _parent: u64,
+        _name: &OsStr,
+        _link: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
+        reply.error(libc::EPERM);
+    }
+
+    fn readlink(&mut self, _req: &Request, _ino: u64, reply: ReplyData) {
+        reply.error(libc::EPERM);
     }
 }
 
