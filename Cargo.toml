@@ -25,6 +25,7 @@ pico-args = "0.3.1"
 reqwest = "0.10.4"
 serde = { version = "1.0.106", features = ["derive"] }
 serde_json = "1.0.51"
+sharded-slab = "0.0.9"
 static_assertions = "1.1.0"
 # For `fuse` compatibility
 time = "0.1"
