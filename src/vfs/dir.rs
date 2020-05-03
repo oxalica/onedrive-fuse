@@ -1,6 +1,5 @@
-use crate::{error::CResult, vfs::inode::InodePool, vfs::ResultExt as _};
+use crate::{error::Result, vfs::inode::InodePool};
 use onedrive_api::{ItemId, ItemLocation, ListChildrenFetcher, OneDrive};
-use reqwest::StatusCode;
 use sharded_slab::{Clear, Pool};
 use std::{convert::TryFrom, ffi::OsString, sync::Mutex as SyncMutex};
 
@@ -81,14 +80,14 @@ impl DirPool {
         offset: u64,
         inode_pool: &InodePool,
         onedrive: &OneDrive,
-    ) -> CResult<impl AsRef<[DirEntry]>> {
+    ) -> Result<impl AsRef<[DirEntry]>> {
         use onedrive_api::{option::CollectionOption, resource::DriveItemField};
 
         let offset = usize::try_from(offset).unwrap();
 
         let item_id;
         let loc = {
-            let dir = self.pool.get(Self::fh_to_idx(fh)).ok_or(libc::EINVAL)?;
+            let dir = self.pool.get(Self::fh_to_idx(fh)).expect("Invalid fh");
             if let Some(v) = &*dir.entries.lock().unwrap() {
                 // TODO: Avoid copy.
                 return Ok(v[offset..].to_vec());
@@ -103,7 +102,7 @@ impl DirPool {
         };
 
         // FIXME: Race request.
-        let fetcher: ListChildrenFetcher = match onedrive
+        let fetcher: ListChildrenFetcher = onedrive
             .list_children_with_option(
                 loc,
                 CollectionOption::new().select(&[
@@ -112,21 +111,9 @@ impl DirPool {
                     DriveItemField::folder,
                 ]),
             )
-            .await
-        {
-            Ok(Some(fetcher)) => fetcher,
-            Ok(None) => unreachable!("No If-Non-Match"),
-            Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
-                return Err(libc::ENOENT);
-            }
-            Err(err) => {
-                return Err(err).c_err("read_dir", libc::EIO);
-            }
-        };
-        let items = fetcher
-            .fetch_all(onedrive)
-            .await
-            .c_err("read_dir", libc::EIO)?;
+            .await?
+            .expect("No If-Non-Match");
+        let items = fetcher.fetch_all(onedrive).await?;
 
         let mut entries = Vec::with_capacity(items.len());
         for item in items {
@@ -142,7 +129,7 @@ impl DirPool {
         let ret = entries[offset..].to_vec();
 
         {
-            let dir = self.pool.get(Self::fh_to_idx(fh)).ok_or(libc::EINVAL)?;
+            let dir = self.pool.get(Self::fh_to_idx(fh)).expect("Invalid fh");
             *dir.entries.lock().unwrap() = Some(entries);
         }
 

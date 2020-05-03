@@ -1,6 +1,5 @@
-use super::vfs;
+use crate::{error::IntoCError as _, vfs};
 use fuse::*;
-use libc::c_int;
 use onedrive_api::OneDrive;
 use std::{ffi::OsStr, sync::Arc};
 use time::Timespec;
@@ -71,7 +70,7 @@ impl FilesystemInner {
 }
 
 impl fuse::Filesystem for Filesystem {
-    fn init(&mut self, _req: &Request) -> Result<(), c_int> {
+    fn init(&mut self, _req: &Request) -> std::result::Result<(), libc::c_int> {
         log::info!("initialize");
         Ok(())
     }
@@ -84,7 +83,7 @@ impl fuse::Filesystem for Filesystem {
         log::debug!("statfs");
         self.spawn(|inner| async move {
             match inner.vfs.statfs(&inner.onedrive).await {
-                Err(err) => reply.error(err),
+                Err(err) => reply.error(err.into_c_err()),
                 Ok(vfs::Statfs { total, free }) => reply.statfs(
                     to_blocks_ceil(total),
                     to_blocks_floor(free),
@@ -104,7 +103,7 @@ impl fuse::Filesystem for Filesystem {
         let name = name.to_owned();
         self.spawn(|inner| async move {
             match inner.vfs.lookup(parent, &name, &inner.onedrive).await {
-                Err(err) => reply.error(err),
+                Err(err) => reply.error(err.into_c_err()),
                 Ok((ino, attr, ttl)) => {
                     let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
@@ -117,10 +116,7 @@ impl fuse::Filesystem for Filesystem {
     fn forget(&mut self, _req: &Request, ino: u64, nlookup: u64) {
         log::debug!("forget #{} nlookup={}", ino, nlookup);
         self.spawn(|inner| async move {
-            match inner.vfs.forget(ino, nlookup).await {
-                Err(err) => log::error!("forget: {}", err),
-                Ok(()) => {}
-            }
+            inner.vfs.forget(ino, nlookup).await;
         });
     }
 
@@ -128,7 +124,7 @@ impl fuse::Filesystem for Filesystem {
         log::debug!("getattr #{}", ino);
         self.spawn(|inner| async move {
             match inner.vfs.get_attr(ino, &inner.onedrive).await {
-                Err(err) => reply.error(err),
+                Err(err) => reply.error(err.into_c_err()),
                 Ok((attr, ttl)) => {
                     let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
@@ -142,7 +138,7 @@ impl fuse::Filesystem for Filesystem {
         // FIXME: Check flags?
         self.spawn(|inner| async move {
             match inner.vfs.open_dir(ino).await {
-                Err(err) => reply.error(err),
+                Err(err) => reply.error(err.into_c_err()),
                 Ok(fh) => {
                     log::debug!("opendir #{} flags={} -> {}", ino, flags, fh);
                     reply.opened(fh, 0)
@@ -154,10 +150,7 @@ impl fuse::Filesystem for Filesystem {
     fn releasedir(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, reply: ReplyEmpty) {
         log::debug!("releasedir #{} fh={}", ino, fh);
         self.spawn(|inner| async move {
-            match inner.vfs.close_dir(ino, fh).await {
-                Err(err) => reply.error(err),
-                Ok(()) => reply.ok(),
-            }
+            inner.vfs.close_dir(ino, fh).await;
         });
     }
 
@@ -172,7 +165,7 @@ impl fuse::Filesystem for Filesystem {
         let offset = offset as u64;
         self.spawn(|inner| async move {
             match inner.vfs.read_dir(ino, fh, offset, &inner.onedrive).await {
-                Err(err) => reply.error(err),
+                Err(err) => reply.error(err.into_c_err()),
                 Ok(entries) => {
                     let mut count = 0usize;
                     for (idx, entry) in entries.as_ref().iter().enumerate() {
