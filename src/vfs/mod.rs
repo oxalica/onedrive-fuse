@@ -1,4 +1,4 @@
-use crate::fs::CResult;
+use crate::error::CResult;
 use anyhow::Result as AResult;
 use fuse::FUSE_ROOT_ID;
 use onedrive_api::{FileName, ItemId, ItemLocation, OneDrive};

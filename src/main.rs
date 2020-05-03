@@ -4,7 +4,9 @@ use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-mod fs;
+mod error;
+mod fuse_fs;
+mod vfs;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,7 +37,7 @@ async fn main() -> Result<()> {
     let onedrive = OneDrive::new(tokens.access_token, DriveLocation::me());
 
     let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
-    let fs = fs::Filesystem::new(onedrive, uid, gid);
+    let fs = fuse_fs::Filesystem::new(onedrive, uid, gid);
     tokio::task::spawn_blocking(move || fuse::mount(fs, &args.mount_point, &[])).await??;
     Ok(())
 }

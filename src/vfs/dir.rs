@@ -1,5 +1,4 @@
-use super::inode::InodePool;
-use crate::fs::{vfs::ResultExt as _, CResult};
+use crate::{error::CResult, vfs::inode::InodePool, vfs::ResultExt as _};
 use onedrive_api::{ItemId, ItemLocation, ListChildrenFetcher, OneDrive};
 use reqwest::StatusCode;
 use sharded_slab::{Clear, Pool};
