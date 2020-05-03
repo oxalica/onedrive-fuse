@@ -137,6 +137,68 @@ impl fuse::Filesystem for Filesystem {
             }
         });
     }
+
+    fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+        // FIXME: Check flags?
+        self.spawn(|inner| async move {
+            match inner.vfs.open_dir(ino).await {
+                Err(err) => reply.error(err),
+                Ok(fh) => {
+                    log::debug!("opendir #{} flags={} -> {}", ino, flags, fh);
+                    reply.opened(fh, 0)
+                }
+            }
+        });
+    }
+
+    fn releasedir(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, reply: ReplyEmpty) {
+        log::debug!("releasedir #{} fh={}", ino, fh);
+        self.spawn(|inner| async move {
+            match inner.vfs.close_dir(ino, fh).await {
+                Err(err) => reply.error(err),
+                Ok(()) => reply.ok(),
+            }
+        });
+    }
+
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let offset = offset as u64;
+        self.spawn(|inner| async move {
+            match inner.vfs.read_dir(ino, fh, offset, &inner.onedrive).await {
+                Err(err) => reply.error(err),
+                Ok(entries) => {
+                    let mut count = 0usize;
+                    for (idx, entry) in entries.as_ref().iter().enumerate() {
+                        let next_offset = offset + idx as u64 + 1;
+                        let kind = if entry.is_directory {
+                            FileType::Directory
+                        } else {
+                            FileType::RegularFile
+                        };
+                        count += 1;
+                        if reply.add(entry.ino, next_offset as i64, kind, &entry.name) {
+                            break;
+                        }
+                    }
+                    log::debug!(
+                        "readdir #{} fh={} offset={} -> {} entries",
+                        ino,
+                        fh,
+                        offset,
+                        count,
+                    );
+                    reply.ok();
+                }
+            }
+        });
+    }
 }
 
 fn to_blocks_ceil(bytes: u64) -> u64 {

@@ -19,11 +19,11 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] lookup
     - [ ] open
       - [ ] O_RDONLY
-    - [ ] opendir
+    - [x] opendir
     - [ ] read
-    - [ ] readdir
+    - [x] readdir
     - [ ] release
-    - [ ] releasedir
+    - [x] releasedir
     - [x] statfs
   - [ ] Write
     - [ ] create

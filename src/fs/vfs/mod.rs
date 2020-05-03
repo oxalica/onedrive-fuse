@@ -1,4 +1,4 @@
-use super::CResult;
+use crate::fs::CResult;
 use anyhow::Result as AResult;
 use fuse::FUSE_ROOT_ID;
 use onedrive_api::{FileName, ItemId, ItemLocation, OneDrive};
@@ -6,7 +6,9 @@ use reqwest::StatusCode;
 use std::{ffi::OsStr, time::Duration};
 use time::Timespec;
 
+mod dir;
 mod inode;
+pub use dir::DirEntry;
 pub use inode::InodeAttr;
 
 trait ResultExt<T> {
@@ -53,6 +55,7 @@ impl<'a> Into<ItemLocation<'a>> for &'a OwnedItemLocation {
 #[derive(Default)]
 pub struct Vfs {
     inode_pool: inode::InodePool,
+    dir_pool: dir::DirPool,
 }
 
 impl Vfs {
@@ -187,5 +190,30 @@ impl Vfs {
             is_directory: item.folder.is_some(),
         };
         Ok(Some((item_id, attr)))
+    }
+
+    pub async fn open_dir(&self, ino: u64) -> CResult<u64> {
+        if ino == FUSE_ROOT_ID {
+            Ok(self.dir_pool.alloc(None).await)
+        } else {
+            let item_id = self.inode_pool.get_item_id(ino).ok_or(libc::EINVAL)?;
+            Ok(self.dir_pool.alloc(Some(item_id)).await)
+        }
+    }
+
+    pub async fn close_dir(&self, _ino: u64, fh: u64) -> CResult<()> {
+        self.dir_pool.free(fh).await.ok_or(libc::EINVAL)
+    }
+
+    pub async fn read_dir(
+        &self,
+        _ino: u64,
+        fh: u64,
+        offset: u64,
+        onedrive: &OneDrive,
+    ) -> CResult<impl AsRef<[DirEntry]>> {
+        self.dir_pool
+            .read(fh, offset, &self.inode_pool, onedrive)
+            .await
     }
 }
