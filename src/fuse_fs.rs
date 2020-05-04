@@ -1,7 +1,7 @@
 use crate::{error::IntoCError as _, vfs};
 use fuse::*;
 use onedrive_api::OneDrive;
-use std::{ffi::OsStr, sync::Arc};
+use std::{convert::TryFrom as _, ffi::OsStr, sync::Arc};
 use time::Timespec;
 
 const GENERATION: u64 = 0;
@@ -90,7 +90,7 @@ impl fuse::Filesystem for Filesystem {
                     to_blocks_floor(free),
                     0,
                     0,
-                    BLOCK_SIZE as u32,
+                    BLOCK_SIZE,
                     NAME_LEN,
                     FRAGMENT_SIZE,
                 ),
@@ -140,7 +140,7 @@ impl fuse::Filesystem for Filesystem {
             match inner.vfs.open_dir(ino).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok(fh) => {
-                    log::debug!("opendir #{} flags={} -> {}", ino, flags, fh);
+                    log::debug!("opendir #{} flags=0x{:X}(0o{1:o}) -> {}", ino, flags, fh);
                     reply.opened(fh, 0)
                 }
             }
@@ -151,6 +151,7 @@ impl fuse::Filesystem for Filesystem {
         log::debug!("releasedir #{} fh={}", ino, fh);
         self.spawn(|inner| async move {
             inner.vfs.close_dir(ino, fh).await;
+            reply.ok();
         });
     }
 
@@ -162,14 +163,18 @@ impl fuse::Filesystem for Filesystem {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let offset = offset as u64;
+        let offset = u64::try_from(offset).unwrap();
         self.spawn(|inner| async move {
             match inner.vfs.read_dir(ino, fh, offset, &inner.onedrive).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok(entries) => {
                     let mut count = 0usize;
                     for (idx, entry) in entries.as_ref().iter().enumerate() {
-                        let next_offset = offset + idx as u64 + 1;
+                        let next_offset = offset
+                            .checked_add(u64::try_from(idx).unwrap())
+                            .unwrap()
+                            .checked_add(1)
+                            .unwrap();
                         let kind = if entry.is_directory {
                             FileType::Directory
                         } else {
