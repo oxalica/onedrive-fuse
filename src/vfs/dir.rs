@@ -74,11 +74,11 @@ impl DirPool {
         }
     }
 
-    pub async fn read(
+    pub async fn read<D: Default + Clear>(
         &self,
         fh: u64,
         offset: u64,
-        inode_pool: &InodePool,
+        inode_pool: &InodePool<D>,
         onedrive: &OneDrive,
     ) -> Result<impl AsRef<[DirEntry]>> {
         use onedrive_api::{option::CollectionOption, resource::DriveItemField};

@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use fuse::FUSE_ROOT_ID;
 use onedrive_api::{FileName, ItemId, ItemLocation, OneDrive};
+use sharded_slab::Clear;
 use std::{ffi::OsStr, time::Duration};
 use time::Timespec;
 
@@ -36,8 +37,15 @@ impl<'a> Into<ItemLocation<'a>> for &'a OwnedItemLocation {
 
 #[derive(Default)]
 pub struct Vfs {
-    inode_pool: inode::InodePool,
+    inode_pool: inode::InodePool<InodeData>,
     dir_pool: dir::DirPool,
+}
+
+#[derive(Default)]
+struct InodeData {}
+
+impl Clear for InodeData {
+    fn clear(&mut self) {}
 }
 
 impl Vfs {

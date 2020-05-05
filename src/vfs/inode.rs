@@ -17,42 +17,46 @@ pub struct InodeAttr {
 }
 
 #[derive(Default)]
-pub struct InodePool {
-    pool: Pool<Inode>,
+pub struct InodePool<Data: Default + Clear> {
+    pool: Pool<Inode<Data>>,
     rev_map: Mutex<HashMap<ItemId, usize>>,
 }
 
-struct Inode {
+struct Inode<Data> {
     ref_count: AtomicU64,
     item_id: ItemId,
+    data: Data,
 }
 
-impl Clear for Inode {
+impl<Data: Clear> Clear for Inode<Data> {
     fn clear(&mut self) {
         self.item_id.0.clear();
+        self.data.clear();
     }
 }
 
 // Required by `Pool`. Set to an invalid state.
-impl Default for Inode {
+impl<Data: Default> Default for Inode<Data> {
     fn default() -> Self {
         Self {
             ref_count: 0.into(),
             item_id: ItemId(String::new()),
+            data: Default::default(),
         }
     }
 }
 
-impl Inode {
+impl<Data: Default> Inode<Data> {
     fn new(item_id: ItemId) -> Self {
         Self {
             ref_count: 1.into(),
             item_id,
+            data: Default::default(),
         }
     }
 }
 
-impl InodePool {
+impl<Data: Default + Clear> InodePool<Data> {
     fn idx_to_ino(idx: usize) -> u64 {
         (idx as u64).wrapping_add(FUSE_ROOT_ID + 1)
     }
@@ -101,5 +105,20 @@ impl InodePool {
         assert!(rev_g.remove(&g.item_id).is_some());
         assert!(self.pool.clear(idx));
         Some(())
+    }
+
+    pub fn get_data<'a>(&'a self, ino: u64) -> Option<impl std::ops::Deref<Target = Data> + 'a> {
+        use sharded_slab::{Config, PoolGuard};
+
+        struct Wrap<'a, Data: Default + Clear, C: Config>(PoolGuard<'a, Inode<Data>, C>);
+
+        impl<Data: Default + Clear, C: Config> std::ops::Deref for Wrap<'_, Data, C> {
+            type Target = Data;
+            fn deref(&self) -> &Self::Target {
+                &self.0.data
+            }
+        }
+
+        self.pool.get(Self::ino_to_idx(ino)).map(Wrap)
     }
 }
