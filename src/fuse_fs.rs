@@ -84,7 +84,7 @@ impl fuse::Filesystem for Filesystem {
         self.spawn(|inner| async move {
             match inner.vfs.statfs(&inner.onedrive).await {
                 Err(err) => reply.error(err.into_c_err()),
-                Ok(vfs::Statfs { total, free }) => reply.statfs(
+                Ok(vfs::StatfsData { total, free }) => reply.statfs(
                     to_blocks_ceil(total),
                     to_blocks_floor(free),
                     to_blocks_floor(free),

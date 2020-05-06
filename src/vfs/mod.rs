@@ -7,14 +7,10 @@ use time::Timespec;
 
 mod dir;
 mod inode;
+mod statfs;
 pub use dir::DirEntry;
 pub use inode::InodeAttr;
-
-#[derive(Clone)]
-pub struct Statfs {
-    pub total: u64,
-    pub free: u64,
-}
+pub use statfs::StatfsData;
 
 enum OwnedItemLocation {
     Root,
@@ -37,6 +33,7 @@ impl<'a> Into<ItemLocation<'a>> for &'a OwnedItemLocation {
 
 #[derive(Default)]
 pub struct Vfs {
+    statfs: statfs::Statfs,
     inode_pool: inode::InodePool<InodeData>,
     dir_pool: dir::DirPool,
 }
@@ -49,30 +46,8 @@ impl Clear for InodeData {
 }
 
 impl Vfs {
-    pub async fn statfs(&self, onedrive: &OneDrive) -> Result<Statfs> {
-        // TODO: Cache
-        self.statfs_raw(onedrive).await
-    }
-
-    async fn statfs_raw(&self, onedrive: &OneDrive) -> Result<Statfs> {
-        use onedrive_api::{option::ObjectOption, resource::DriveField};
-
-        #[derive(Debug, serde::Deserialize)]
-        struct Quota {
-            total: u64,
-            remaining: u64,
-            // used: u64,
-        }
-
-        let drive = onedrive
-            .get_drive_with_option(ObjectOption::new().select(&[DriveField::quota]))
-            .await?;
-        let quota: Quota =
-            serde_json::from_value(*drive.quota.unwrap()).expect("Deserialize error");
-        Ok(Statfs {
-            total: quota.total,
-            free: quota.remaining,
-        })
+    pub async fn statfs(&self, onedrive: &OneDrive) -> Result<StatfsData> {
+        self.statfs.statfs(onedrive).await
     }
 
     fn cvt_filename<'a>(&self, name: &'a OsStr) -> Result<&'a FileName> {
