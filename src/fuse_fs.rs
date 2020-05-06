@@ -25,13 +25,13 @@ struct FilesystemInner {
 }
 
 impl Filesystem {
-    pub async fn new(onedrive: OneDrive, uid: u32, gid: u32) -> Result<Self> {
+    pub async fn new(onedrive: OneDrive, uid: u32, gid: u32, config: vfs::Config) -> Result<Self> {
         Ok(Self {
             inner: Arc::new(FilesystemInner {
                 client: reqwest::Client::new(),
                 uid,
                 gid,
-                vfs: vfs::Vfs::new(&onedrive).await?,
+                vfs: vfs::Vfs::new(config, &onedrive).await?,
                 onedrive,
             }),
         })
@@ -87,7 +87,7 @@ impl fuse::Filesystem for Filesystem {
         self.spawn(|inner| async move {
             match inner.vfs.statfs(&inner.onedrive).await {
                 Err(err) => reply.error(err.into_c_err()),
-                Ok(vfs::StatfsData { total, free }) => reply.statfs(
+                Ok((vfs::StatfsData { total, free }, _ttl)) => reply.statfs(
                     to_blocks_ceil(total),
                     to_blocks_floor(free),
                     to_blocks_floor(free),

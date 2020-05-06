@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod error;
 mod fuse_fs;
+mod util;
 mod vfs;
 
 #[tokio::main]
@@ -37,11 +38,22 @@ async fn main() -> Result<()> {
     let onedrive = OneDrive::new(tokens.access_token, DriveLocation::me());
 
     let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
-    let fs = fuse_fs::Filesystem::new(onedrive, uid, gid)
+    let config = load_vfs_config()?;
+    let fs = fuse_fs::Filesystem::new(onedrive, uid, gid, config)
         .await
         .expect("Cannot initialize vfs");
     tokio::task::spawn_blocking(move || fuse::mount(fs, &args.mount_point, &[])).await??;
     Ok(())
+}
+
+// TODO: Load custom config.
+fn load_vfs_config() -> Result<vfs::Config> {
+    use config::{Config, File, FileFormat};
+    const DEFAULT_CONFIG: &str = include_str!("../config.default.toml");
+
+    let mut conf = Config::new();
+    conf.merge(File::from_str(DEFAULT_CONFIG, FileFormat::Toml))?;
+    Ok(conf.try_into()?)
 }
 
 #[derive(Debug)]

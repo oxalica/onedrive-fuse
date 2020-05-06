@@ -57,7 +57,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - setxattr
     - symlink
 - [ ] Cache
-  - [ ] Statfs cache
+  - [x] Statfs cache
   - [ ] Directory tree cache
   - [ ] Read cache
   - [ ] Write cache

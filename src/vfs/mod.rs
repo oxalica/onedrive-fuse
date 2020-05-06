@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use fuse::FUSE_ROOT_ID;
 use onedrive_api::{FileName, ItemId, ItemLocation, OneDrive};
+use serde::Deserialize;
 use sharded_slab::Clear;
 use std::{ffi::OsStr, time::Duration};
 use time::Timespec;
@@ -11,6 +12,11 @@ mod statfs;
 pub use dir::DirEntry;
 pub use inode::InodeAttr;
 pub use statfs::StatfsData;
+
+#[derive(Deserialize)]
+pub struct Config {
+    statfs: statfs::Config,
+}
 
 pub struct Vfs {
     statfs: statfs::Statfs,
@@ -26,7 +32,7 @@ impl Clear for InodeData {
 }
 
 impl Vfs {
-    pub async fn new(onedrive: &OneDrive) -> Result<Self> {
+    pub async fn new(config: Config, onedrive: &OneDrive) -> Result<Self> {
         use onedrive_api::{option::ObjectOption, resource::DriveItemField};
         let root_item_id = onedrive
             .get_item_with_option(
@@ -39,13 +45,13 @@ impl Vfs {
             .expect("`id` is selected");
 
         Ok(Self {
-            statfs: Default::default(),
+            statfs: statfs::Statfs::new(config.statfs),
             inode_pool: inode::InodePool::new(root_item_id).await,
             dir_pool: Default::default(),
         })
     }
 
-    pub async fn statfs(&self, onedrive: &OneDrive) -> Result<StatfsData> {
+    pub async fn statfs(&self, onedrive: &OneDrive) -> Result<(StatfsData, Duration)> {
         self.statfs.statfs(onedrive).await
     }
 
