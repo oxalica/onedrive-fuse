@@ -1,2 +1,5 @@
 [statfs]
 cache_ttl = 30
+
+[inode]
+attr_cache_ttl = 30

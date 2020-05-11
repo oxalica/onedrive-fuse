@@ -9,6 +9,7 @@ use time::Timespec;
 use tokio::sync::Mutex;
 
 // This should not hold any heap-allocation due to the requirement `Inode: Clear`.
+#[derive(Clone, Copy)]
 pub struct InodeAttr {
     pub size: u64,
     pub mtime: Timespec,

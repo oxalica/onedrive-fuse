@@ -1,10 +1,18 @@
-use crate::error::{Error, Result};
+use crate::{
+    error::{Error, Result},
+    util::de_duration_sec,
+};
 use fuse::FUSE_ROOT_ID;
 use onedrive_api::{FileName, ItemId, ItemLocation, OneDrive};
 use serde::Deserialize;
 use sharded_slab::Clear;
-use std::{ffi::OsStr, time::Duration};
+use std::{
+    ffi::OsStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use time::Timespec;
+use tokio::sync::Mutex;
 
 mod dir;
 mod inode;
@@ -16,19 +24,33 @@ pub use statfs::StatfsData;
 #[derive(Deserialize)]
 pub struct Config {
     statfs: statfs::Config,
+    inode: InodeConfig,
+}
+
+#[derive(Deserialize)]
+pub struct InodeConfig {
+    #[serde(deserialize_with = "de_duration_sec")]
+    attr_cache_ttl: Duration,
 }
 
 pub struct Vfs {
+    inode_config: InodeConfig,
     statfs: statfs::Statfs,
     inode_pool: inode::InodePool<InodeData>,
     dir_pool: dir::DirPool,
 }
 
 #[derive(Default)]
-struct InodeData {}
+struct InodeData {
+    /// FIXME: Remove `Arc`. https://github.com/hawkw/sharded-slab/issues/43
+    attr_cache: Arc<Mutex<Option<(InodeAttr, Instant)>>>,
+}
 
 impl Clear for InodeData {
-    fn clear(&mut self) {}
+    fn clear(&mut self) {
+        // Avoid pollution.
+        self.attr_cache = Default::default();
+    }
 }
 
 impl Vfs {
@@ -48,6 +70,7 @@ impl Vfs {
             statfs: statfs::Statfs::new(config.statfs),
             inode_pool: inode::InodePool::new(root_item_id).await,
             dir_pool: Default::default(),
+            inode_config: config.inode,
         })
     }
 
@@ -113,7 +136,12 @@ impl Vfs {
         .await?;
 
         let ino = self.inode_pool.get_or_alloc_ino(item_id).await;
-        let ttl = Duration::new(0, 0);
+
+        // Fresh cache.
+        let cache = self.inode_pool.get_data(ino).unwrap().attr_cache.clone();
+        *cache.lock().await = Some((attr, Instant::now()));
+
+        let ttl = self.inode_config.attr_cache_ttl;
         Ok((ino, attr, ttl))
     }
 
@@ -125,10 +153,32 @@ impl Vfs {
     }
 
     pub async fn get_attr(&self, ino: u64, onedrive: &OneDrive) -> Result<(InodeAttr, Duration)> {
-        // TODO: Attr cache
+        // Check from cache.
+        let cache = self
+            .inode_pool
+            .get_data(ino)
+            .expect("Invalid inode")
+            .attr_cache
+            .clone();
+        let mut cache = cache.lock().await;
+        if let Some((last_attr, last_inst)) = &*cache {
+            if let Some(ttl) = self
+                .inode_config
+                .attr_cache_ttl
+                .checked_sub(last_inst.elapsed())
+            {
+                return Ok((*last_attr, ttl));
+            }
+        }
+
+        // Cache miss. Hold the mutex during the request.
+        log::debug!("get_attr: cache miss");
         let item_id = self.inode_pool.get_item_id(ino).expect("Invalid inode");
         let (_, attr) = Self::get_attr_raw(ItemLocation::from_id(&item_id), onedrive).await?;
-        let ttl = Duration::new(0, 0);
+        // Fresh cache.
+        *cache = Some((attr, Instant::now()));
+
+        let ttl = self.inode_config.attr_cache_ttl;
         Ok((attr, ttl))
     }
 

@@ -58,6 +58,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - symlink
 - [ ] Cache
   - [x] Statfs cache
+  - [x] Inode attributes (stat) cache
   - [ ] Directory tree cache
   - [ ] Read cache
   - [ ] Write cache
