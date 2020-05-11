@@ -1,4 +1,7 @@
-use crate::{error::IntoCError as _, vfs};
+use crate::{
+    error::{IntoCError as _, Result},
+    vfs,
+};
 use fuse::*;
 use onedrive_api::OneDrive;
 use std::{convert::TryFrom as _, ffi::OsStr, sync::Arc};
@@ -22,16 +25,16 @@ struct FilesystemInner {
 }
 
 impl Filesystem {
-    pub fn new(onedrive: OneDrive, uid: u32, gid: u32) -> Self {
-        Self {
+    pub async fn new(onedrive: OneDrive, uid: u32, gid: u32) -> Result<Self> {
+        Ok(Self {
             inner: Arc::new(FilesystemInner {
-                onedrive,
                 client: reqwest::Client::new(),
                 uid,
                 gid,
-                vfs: Default::default(),
+                vfs: vfs::Vfs::new(&onedrive).await?,
+                onedrive,
             }),
-        }
+        })
     }
 
     fn spawn<F, Fut>(&self, f: F)

@@ -12,26 +12,6 @@ pub use dir::DirEntry;
 pub use inode::InodeAttr;
 pub use statfs::StatfsData;
 
-enum OwnedItemLocation {
-    Root,
-    Id(ItemId),
-    Path(String),
-    ChildOfId(ItemId, String),
-}
-
-impl<'a> Into<ItemLocation<'a>> for &'a OwnedItemLocation {
-    fn into(self) -> ItemLocation<'a> {
-        use OwnedItemLocation::*;
-        match self {
-            Root => ItemLocation::root(),
-            Id(id) => ItemLocation::from_id(id),
-            Path(path) => ItemLocation::from_path(path).unwrap(),
-            ChildOfId(id, name) => ItemLocation::child_of_id(id, FileName::new(name).unwrap()),
-        }
-    }
-}
-
-#[derive(Default)]
 pub struct Vfs {
     statfs: statfs::Statfs,
     inode_pool: inode::InodePool<InodeData>,
@@ -46,67 +26,30 @@ impl Clear for InodeData {
 }
 
 impl Vfs {
+    pub async fn new(onedrive: &OneDrive) -> Result<Self> {
+        use onedrive_api::{option::ObjectOption, resource::DriveItemField};
+        let root_item_id = onedrive
+            .get_item_with_option(
+                ItemLocation::root(),
+                ObjectOption::new().select(&[DriveItemField::id]),
+            )
+            .await?
+            .expect("No If-None-Match")
+            .id
+            .expect("`id` is selected");
+
+        Ok(Self {
+            statfs: Default::default(),
+            inode_pool: inode::InodePool::new(root_item_id).await,
+            dir_pool: Default::default(),
+        })
+    }
+
     pub async fn statfs(&self, onedrive: &OneDrive) -> Result<StatfsData> {
         self.statfs.statfs(onedrive).await
     }
 
-    fn cvt_filename<'a>(&self, name: &'a OsStr) -> Result<&'a FileName> {
-        name.to_str()
-            .and_then(FileName::new)
-            .ok_or(Error::InvalidArgument("Invalid filename"))
-    }
-
-    fn location_of_ino_child(&self, parent: u64, child: &OsStr) -> Result<OwnedItemLocation> {
-        let child = self.cvt_filename(child)?;
-        if parent == FUSE_ROOT_ID {
-            Ok(OwnedItemLocation::Path(format!("/{}", child.as_str())))
-        } else {
-            Ok(OwnedItemLocation::ChildOfId(
-                self.inode_pool.get_item_id(parent).expect("Invalid inode"),
-                child.as_str().to_owned(),
-            ))
-        }
-    }
-
-    fn location_of_ino(&self, ino: u64) -> OwnedItemLocation {
-        if ino == FUSE_ROOT_ID {
-            OwnedItemLocation::Root
-        } else {
-            OwnedItemLocation::Id(self.inode_pool.get_item_id(ino).expect("Invalid inode"))
-        }
-    }
-
-    pub async fn lookup(
-        &self,
-        parent_ino: u64,
-        child_name: &OsStr,
-        onedrive: &OneDrive,
-    ) -> Result<(u64, InodeAttr, Duration)> {
-        // Check from directory cache.
-        let loc = self.location_of_ino_child(parent_ino, child_name)?;
-        let (item_id, attr) = self.get_attr_raw((&loc).into(), onedrive).await?;
-        let ino = self.inode_pool.get_or_alloc_ino(item_id).await;
-        let ttl = Duration::new(0, 0);
-        Ok((ino, attr, ttl))
-    }
-
-    pub async fn forget(&self, ino: u64, count: u64) {
-        self.inode_pool
-            .free(ino, count)
-            .await
-            .expect("Invalid inode");
-    }
-
-    pub async fn get_attr(&self, ino: u64, onedrive: &OneDrive) -> Result<(InodeAttr, Duration)> {
-        // TODO: Attr cache
-        let loc = self.location_of_ino(ino);
-        let (_, attr) = self.get_attr_raw((&loc).into(), onedrive).await?;
-        let ttl = Duration::new(0, 0);
-        Ok((attr, ttl))
-    }
-
     async fn get_attr_raw(
-        &self,
         loc: ItemLocation<'_>,
         onedrive: &OneDrive,
     ) -> Result<(ItemId, InodeAttr)> {
@@ -145,6 +88,44 @@ impl Vfs {
         Ok((item_id, attr))
     }
 
+    pub async fn lookup(
+        &self,
+        parent_ino: u64,
+        child_name: &OsStr,
+        onedrive: &OneDrive,
+    ) -> Result<(u64, InodeAttr, Duration)> {
+        // Check from directory cache first.
+        let parent_item_id = self
+            .inode_pool
+            .get_item_id(parent_ino)
+            .expect("Invalid inode");
+        let child_name = cvt_filename(child_name)?;
+        let (item_id, attr) = Self::get_attr_raw(
+            ItemLocation::child_of_id(&parent_item_id, child_name),
+            onedrive,
+        )
+        .await?;
+
+        let ino = self.inode_pool.get_or_alloc_ino(item_id).await;
+        let ttl = Duration::new(0, 0);
+        Ok((ino, attr, ttl))
+    }
+
+    pub async fn forget(&self, ino: u64, count: u64) {
+        self.inode_pool
+            .free(ino, count)
+            .await
+            .expect("Invalid inode");
+    }
+
+    pub async fn get_attr(&self, ino: u64, onedrive: &OneDrive) -> Result<(InodeAttr, Duration)> {
+        // TODO: Attr cache
+        let item_id = self.inode_pool.get_item_id(ino).expect("Invalid inode");
+        let (_, attr) = Self::get_attr_raw(ItemLocation::from_id(&item_id), onedrive).await?;
+        let ttl = Duration::new(0, 0);
+        Ok((attr, ttl))
+    }
+
     pub async fn open_dir(&self, ino: u64) -> Result<u64> {
         if ino == FUSE_ROOT_ID {
             Ok(self.dir_pool.alloc(None).await)
@@ -169,4 +150,10 @@ impl Vfs {
             .read(fh, offset, &self.inode_pool, onedrive)
             .await
     }
+}
+
+fn cvt_filename<'a>(name: &'a OsStr) -> Result<&'a FileName> {
+    name.to_str()
+        .and_then(FileName::new)
+        .ok_or(Error::InvalidArgument("Invalid filename"))
 }

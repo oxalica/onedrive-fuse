@@ -1,8 +1,8 @@
-use fuse::FUSE_ROOT_ID;
 use onedrive_api::ItemId;
 use sharded_slab::{Clear, Pool};
 use std::{
     collections::hash_map::{Entry, HashMap},
+    convert::TryFrom as _,
     sync::atomic::{AtomicU64, Ordering},
 };
 use time::Timespec;
@@ -18,6 +18,8 @@ pub struct InodeAttr {
 
 #[derive(Default)]
 pub struct InodePool<Data: Default + Clear> {
+    /// ino_shift = ino - key
+    ino_shift: u64,
     pool: Pool<Inode<Data>>,
     rev_map: Mutex<HashMap<ItemId, usize>>,
 }
@@ -56,14 +58,30 @@ impl<Data: Default> Inode<Data> {
     }
 }
 
+const ROOT_INO: u64 = fuse::FUSE_ROOT_ID;
+static_assertions::const_assert_eq!(ROOT_INO, 1);
+
 impl<Data: Default + Clear> InodePool<Data> {
-    fn idx_to_ino(idx: usize) -> u64 {
-        (idx as u64).wrapping_add(FUSE_ROOT_ID + 1)
+    /// Initialize inode pool with root id to make operation on root nothing special.
+    pub async fn new(root_item_id: ItemId) -> Self {
+        let mut ret = Self {
+            ino_shift: 0,
+            pool: Default::default(),
+            rev_map: Default::default(),
+        };
+        // Root has ref-count initialized at 1.
+        let root_key = ret.get_or_alloc_ino(root_item_id).await;
+        ret.ino_shift = ROOT_INO - root_key;
+        ret
     }
 
-    fn ino_to_idx(ino: u64) -> usize {
-        assert_ne!(ino, FUSE_ROOT_ID);
-        ino.wrapping_sub(FUSE_ROOT_ID + 1) as usize
+    // TODO: idx? key?
+    fn idx_to_ino(&self, idx: usize) -> u64 {
+        u64::try_from(idx).unwrap().wrapping_add(self.ino_shift)
+    }
+
+    fn ino_to_idx(&self, ino: u64) -> usize {
+        usize::try_from(ino.wrapping_sub(self.ino_shift)).unwrap()
     }
 
     pub async fn get_or_alloc_ino(&self, item_id: ItemId) -> u64 {
@@ -86,15 +104,15 @@ impl<Data: Default + Clear> InodePool<Data> {
                 idx
             }
         };
-        Self::idx_to_ino(idx)
+        self.idx_to_ino(idx)
     }
 
     pub fn get_item_id(&self, ino: u64) -> Option<ItemId> {
-        Some(self.pool.get(Self::ino_to_idx(ino))?.item_id.clone())
+        Some(self.pool.get(self.ino_to_idx(ino))?.item_id.clone())
     }
 
     pub async fn free(&self, ino: u64, count: u64) -> Option<()> {
-        let idx = Self::ino_to_idx(ino);
+        let idx = self.ino_to_idx(ino);
         // Lock first to avoid race with get_or_alloc.
         let mut rev_g = self.rev_map.lock().await;
         let g = self.pool.get(idx)?;
@@ -119,6 +137,6 @@ impl<Data: Default + Clear> InodePool<Data> {
             }
         }
 
-        self.pool.get(Self::ino_to_idx(ino)).map(Wrap)
+        self.pool.get(self.ino_to_idx(ino)).map(Wrap)
     }
 }

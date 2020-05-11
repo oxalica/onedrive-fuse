@@ -37,7 +37,9 @@ async fn main() -> Result<()> {
     let onedrive = OneDrive::new(tokens.access_token, DriveLocation::me());
 
     let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
-    let fs = fuse_fs::Filesystem::new(onedrive, uid, gid);
+    let fs = fuse_fs::Filesystem::new(onedrive, uid, gid)
+        .await
+        .expect("Cannot initialize vfs");
     tokio::task::spawn_blocking(move || fuse::mount(fs, &args.mount_point, &[])).await??;
     Ok(())
 }
