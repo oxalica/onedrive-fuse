@@ -12,32 +12,32 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
 ## Features implemented
 
 - [ ] FUSE syscalls
-  - [x] Read
-    - [x] access
+  - [ ] Read
+    - [ ] access
     - [x] forget
     - [x] getattr
     - [x] lookup
-    - [x] open
-      - [x] O_RDONLY
+    - [ ] open
+      - [ ] O_RDONLY
     - [x] opendir
-    - [x] read
+    - [ ] read
     - [x] readdir
-    - [x] release
+    - [ ] release
     - [x] releasedir
     - [x] statfs
   - [ ] Write
     - [ ] create
-    - [x] mkdir
+    - [ ] mkdir
     - [ ] mknod
     - [ ] open
       - [ ] O_WRONLY
       - [ ] O_RDWR
       - [ ] O_TRUNC
       - [ ] O_CREAT
-    - [x] rename
-    - [x] rmdir
+    - [ ] rename
+    - [ ] rmdir
     - [ ] setattr
-    - [x] unlink
+    - [ ] unlink
     - [ ] write
   - [ ] Other
     - destroy
@@ -57,6 +57,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - setxattr
     - symlink
 - [ ] Cache
+  - [ ] Statfs cache
   - [ ] Directory tree cache
   - [ ] Read cache
   - [ ] Write cache
