@@ -43,17 +43,17 @@ impl Clear for Dir {
 }
 
 impl DirPool {
-    fn idx_to_fh(idx: usize) -> u64 {
-        u64::try_from(idx).unwrap()
+    fn key_to_fh(key: usize) -> u64 {
+        u64::try_from(key).unwrap()
     }
 
-    fn fh_to_idx(fh: u64) -> usize {
+    fn fh_to_key(fh: u64) -> usize {
         usize::try_from(fh).unwrap()
     }
 
     // `None` for root
     pub async fn alloc(&self, item_id: Option<ItemId>) -> u64 {
-        let idx = self
+        let key = self
             .pool
             .create(|p| {
                 *p = Dir {
@@ -63,11 +63,11 @@ impl DirPool {
                 };
             })
             .expect("Pool is full");
-        Self::idx_to_fh(idx)
+        Self::key_to_fh(key)
     }
 
     pub async fn free(&self, fh: u64) -> Option<()> {
-        if self.pool.clear(Self::fh_to_idx(fh)) {
+        if self.pool.clear(Self::fh_to_key(fh)) {
             Some(())
         } else {
             None
@@ -87,7 +87,7 @@ impl DirPool {
 
         let item_id;
         let loc = {
-            let dir = self.pool.get(Self::fh_to_idx(fh)).expect("Invalid fh");
+            let dir = self.pool.get(Self::fh_to_key(fh)).expect("Invalid fh");
             if let Some(v) = &*dir.entries.lock().unwrap() {
                 // TODO: Avoid copy.
                 return Ok(v[offset..].to_vec());
@@ -129,7 +129,7 @@ impl DirPool {
         let ret = entries[offset..].to_vec();
 
         {
-            let dir = self.pool.get(Self::fh_to_idx(fh)).expect("Invalid fh");
+            let dir = self.pool.get(Self::fh_to_key(fh)).expect("Invalid fh");
             *dir.entries.lock().unwrap() = Some(entries);
         }
 

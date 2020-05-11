@@ -75,53 +75,52 @@ impl<Data: Default + Clear> InodePool<Data> {
         ret
     }
 
-    // TODO: idx? key?
-    fn idx_to_ino(&self, idx: usize) -> u64 {
-        u64::try_from(idx).unwrap().wrapping_add(self.ino_shift)
+    fn key_to_ino(&self, key: usize) -> u64 {
+        u64::try_from(key).unwrap().wrapping_add(self.ino_shift)
     }
 
-    fn ino_to_idx(&self, ino: u64) -> usize {
+    fn ino_to_key(&self, ino: u64) -> usize {
         usize::try_from(ino.wrapping_sub(self.ino_shift)).unwrap()
     }
 
     pub async fn get_or_alloc_ino(&self, item_id: ItemId) -> u64 {
-        let idx = match self.rev_map.lock().await.entry(item_id) {
+        let key = match self.rev_map.lock().await.entry(item_id) {
             Entry::Occupied(ent) => {
-                let idx = *ent.get();
+                let key = *ent.get();
                 self.pool
-                    .get(idx)
+                    .get(key)
                     .unwrap()
                     .ref_count
                     .fetch_add(1, Ordering::Relaxed);
-                idx
+                key
             }
             Entry::Vacant(ent) => {
-                let idx = self
+                let key = self
                     .pool
                     .create(|p| *p = Inode::new(ent.key().clone()))
                     .expect("Pool is full");
-                ent.insert(idx);
-                idx
+                ent.insert(key);
+                key
             }
         };
-        self.idx_to_ino(idx)
+        self.key_to_ino(key)
     }
 
     pub fn get_item_id(&self, ino: u64) -> Option<ItemId> {
-        Some(self.pool.get(self.ino_to_idx(ino))?.item_id.clone())
+        Some(self.pool.get(self.ino_to_key(ino))?.item_id.clone())
     }
 
     pub async fn free(&self, ino: u64, count: u64) -> Option<()> {
-        let idx = self.ino_to_idx(ino);
+        let key = self.ino_to_key(ino);
         // Lock first to avoid race with get_or_alloc.
         let mut rev_g = self.rev_map.lock().await;
-        let g = self.pool.get(idx)?;
+        let g = self.pool.get(key)?;
         let orig_ref_count = g.ref_count.fetch_sub(count, Ordering::Relaxed);
         if count < orig_ref_count {
             return Some(());
         }
         assert!(rev_g.remove(&g.item_id).is_some());
-        assert!(self.pool.clear(idx));
+        assert!(self.pool.clear(key));
         Some(())
     }
 
@@ -137,6 +136,6 @@ impl<Data: Default + Clear> InodePool<Data> {
             }
         }
 
-        self.pool.get(self.ino_to_idx(ino)).map(Wrap)
+        self.pool.get(self.ino_to_key(ino)).map(Wrap)
     }
 }
