@@ -44,12 +44,13 @@ pub struct Vfs {
 struct InodeData {
     /// FIXME: Remove `Arc`. https://github.com/hawkw/sharded-slab/issues/43
     attr_cache: Arc<Mutex<Option<(InodeAttr, Instant)>>>,
+    dir_cache: dir::Cache,
 }
 
 impl Clear for InodeData {
     fn clear(&mut self) {
         // Avoid pollution.
-        self.attr_cache = Default::default();
+        *self = Default::default();
     }
 }
 
@@ -184,11 +185,13 @@ impl Vfs {
 
     pub async fn open_dir(&self, ino: u64) -> Result<u64> {
         let item_id = self.inode_pool.get_item_id(ino).expect("Invalid inode");
-        Ok(self.dir_pool.alloc(item_id).await)
+        let data = &self.inode_pool.get_data(ino).expect("Invalid inode");
+        let fh = self.dir_pool.open(item_id, &data.dir_cache);
+        Ok(fh)
     }
 
     pub async fn close_dir(&self, _ino: u64, fh: u64) {
-        self.dir_pool.free(fh).await.expect("Invalid fh");
+        self.dir_pool.free(fh).expect("Invalid fh");
     }
 
     pub async fn read_dir(

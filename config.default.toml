@@ -6,3 +6,4 @@ attr_cache_ttl = 30
 
 [dir]
 fetch_page_size = 512
+entries_cache_ttl = 30
