@@ -2,7 +2,6 @@ use crate::{
     error::{Error, Result},
     util::de_duration_sec,
 };
-use fuse::FUSE_ROOT_ID;
 use onedrive_api::{FileName, ItemId, ItemLocation, OneDrive};
 use serde::Deserialize;
 use sharded_slab::Clear;
@@ -25,6 +24,7 @@ pub use statfs::StatfsData;
 pub struct Config {
     statfs: statfs::Config,
     inode: InodeConfig,
+    dir: dir::Config,
 }
 
 #[derive(Deserialize)]
@@ -69,7 +69,7 @@ impl Vfs {
         Ok(Self {
             statfs: statfs::Statfs::new(config.statfs),
             inode_pool: inode::InodePool::new(root_item_id).await,
-            dir_pool: Default::default(),
+            dir_pool: dir::DirPool::new(config.dir),
             inode_config: config.inode,
         })
     }
@@ -183,12 +183,8 @@ impl Vfs {
     }
 
     pub async fn open_dir(&self, ino: u64) -> Result<u64> {
-        if ino == FUSE_ROOT_ID {
-            Ok(self.dir_pool.alloc(None).await)
-        } else {
-            let item_id = self.inode_pool.get_item_id(ino).expect("Invalid inode");
-            Ok(self.dir_pool.alloc(Some(item_id)).await)
-        }
+        let item_id = self.inode_pool.get_item_id(ino).expect("Invalid inode");
+        Ok(self.dir_pool.alloc(item_id).await)
     }
 
     pub async fn close_dir(&self, _ino: u64, fh: u64) {

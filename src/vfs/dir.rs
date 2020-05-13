@@ -1,7 +1,9 @@
 use crate::{error::Result, vfs::inode::InodePool};
-use onedrive_api::{ItemId, ItemLocation, ListChildrenFetcher, OneDrive};
+use onedrive_api::{ItemId, ItemLocation, OneDrive};
+use serde::Deserialize;
 use sharded_slab::{Clear, Pool};
-use std::{convert::TryFrom, ffi::OsString, sync::Mutex as SyncMutex};
+use std::{convert::TryFrom, ffi::OsString, sync::Arc};
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct DirEntry {
@@ -10,39 +12,48 @@ pub struct DirEntry {
     pub is_directory: bool,
 }
 
-#[derive(Default)]
 pub struct DirPool {
-    // To make it `Clear`.
+    config: Config,
+    /// FIXME: Remove `Arc`. https://github.com/hawkw/sharded-slab/issues/43
     pool: Pool<Dir>,
 }
 
-// TODO: Incremental fetch.
+#[derive(Deserialize)]
+pub struct Config {
+    fetch_page_size: std::num::NonZeroUsize,
+}
+
 struct Dir {
-    // `None` for root.
-    item_id: Option<ItemId>,
-    // Will be filled in the first `read`. Directory content will be snapshoted and
-    // kept immutable between `opendir` and `releasedir`.
-    entries: SyncMutex<Option<Vec<DirEntry>>>,
+    item_id: ItemId,
+    entries: Arc<Mutex<Option<Vec<DirEntry>>>>,
 }
 
 // Required by `Pool`.
 impl Default for Dir {
     fn default() -> Self {
         Self {
-            item_id: None,
-            entries: SyncMutex::new(None),
+            item_id: ItemId(String::new()),
+            entries: Default::default(),
         }
     }
 }
 
 impl Clear for Dir {
     fn clear(&mut self) {
-        self.item_id.clear();
-        self.entries.clear();
+        self.item_id.0.clear();
+        // Avoid pollution.
+        self.entries = Default::default();
     }
 }
 
 impl DirPool {
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            pool: Default::default(),
+        }
+    }
+
     fn key_to_fh(key: usize) -> u64 {
         u64::try_from(key).unwrap()
     }
@@ -51,17 +62,10 @@ impl DirPool {
         usize::try_from(fh).unwrap()
     }
 
-    // `None` for root
-    pub async fn alloc(&self, item_id: Option<ItemId>) -> u64 {
+    pub async fn alloc(&self, item_id: ItemId) -> u64 {
         let key = self
             .pool
-            .create(|p| {
-                *p = Dir {
-                    item_id,
-                    // Lazy fetch.
-                    entries: SyncMutex::new(None),
-                };
-            })
+            .create(|p| p.item_id = item_id)
             .expect("Pool is full");
         Self::key_to_fh(key)
     }
@@ -84,55 +88,45 @@ impl DirPool {
         use onedrive_api::{option::CollectionOption, resource::DriveItemField};
 
         let offset = usize::try_from(offset).unwrap();
+        let key = Self::fh_to_key(fh);
 
-        let item_id;
-        let loc = {
-            let dir = self.pool.get(Self::fh_to_key(fh)).expect("Invalid fh");
-            if let Some(v) = &*dir.entries.lock().unwrap() {
-                // TODO: Avoid copy.
-                return Ok(v[offset..].to_vec());
+        let entries = self.pool.get(key).expect("Invalid fh").entries.clone();
+        let mut entries = entries.lock().await;
+        if entries.is_none() {
+            let item_id = self.pool.get(key).expect("Invalid fh").item_id.clone();
+            let fetcher = onedrive
+                .list_children_with_option(
+                    ItemLocation::from_id(&item_id),
+                    CollectionOption::new()
+                        .select(&[
+                            DriveItemField::id,
+                            DriveItemField::name,
+                            DriveItemField::folder,
+                        ])
+                        .page_size(self.config.fetch_page_size.get()),
+                )
+                .await?
+                .expect("No If-Non-Match");
+
+            // TODO: Incremental fetch.
+            let items = fetcher.fetch_all(onedrive).await?;
+
+            let mut ret = Vec::with_capacity(items.len());
+            for item in items {
+                let item_id = item.id.unwrap();
+                let ino = inode_pool.get_or_alloc_ino(item_id).await;
+                // TODO: Cache inode attrs.
+                ret.push(DirEntry {
+                    ino,
+                    name: item.name.unwrap().into(),
+                    is_directory: item.folder.is_some(),
+                });
             }
-            match &dir.item_id {
-                None => ItemLocation::root(),
-                Some(id) => {
-                    item_id = id.clone();
-                    ItemLocation::from_id(&item_id)
-                }
-            }
-        };
 
-        // FIXME: Race request.
-        let fetcher: ListChildrenFetcher = onedrive
-            .list_children_with_option(
-                loc,
-                CollectionOption::new().select(&[
-                    DriveItemField::id,
-                    DriveItemField::name,
-                    DriveItemField::folder,
-                ]),
-            )
-            .await?
-            .expect("No If-Non-Match");
-        let items = fetcher.fetch_all(onedrive).await?;
-
-        let mut entries = Vec::with_capacity(items.len());
-        for item in items {
-            let item_id = item.id.unwrap();
-            let ino = inode_pool.get_or_alloc_ino(item_id).await;
-            entries.push(DirEntry {
-                ino,
-                name: item.name.unwrap().into(),
-                is_directory: item.folder.is_some(),
-            });
+            *entries = Some(ret);
         }
 
-        let ret = entries[offset..].to_vec();
-
-        {
-            let dir = self.pool.get(Self::fh_to_key(fh)).expect("Invalid fh");
-            *dir.entries.lock().unwrap() = Some(entries);
-        }
-
-        Ok(ret)
+        // TODO: Avoid copy.
+        Ok(entries.as_ref().unwrap()[offset..].to_vec())
     }
 }
