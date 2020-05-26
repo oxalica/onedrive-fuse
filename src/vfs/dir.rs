@@ -58,7 +58,7 @@ impl Clear for Dir {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Cache {
     last_fh: Arc<SyncMutex<Option<u64>>>,
 }
@@ -159,11 +159,11 @@ impl DirPool {
         Some(())
     }
 
-    pub async fn read<D: Default + Clear>(
+    pub async fn read(
         &self,
         fh: u64,
         offset: u64,
-        inode_pool: &InodePool<D>,
+        inode_pool: &InodePool,
         onedrive: &OneDrive,
     ) -> Result<impl AsRef<[DirEntry]>> {
         use onedrive_api::{option::CollectionOption, resource::DriveItemField};
@@ -195,8 +195,8 @@ impl DirPool {
             let mut ret = Vec::with_capacity(items.len());
             for item in items {
                 let item_id = item.id.unwrap();
-                let ino = inode_pool.get_or_alloc_ino(item_id).await;
                 // TODO: Cache inode attrs.
+                let ino = inode_pool.touch(item_id).await;
                 ret.push(DirEntry {
                     ino,
                     name: item.name.unwrap().into(),
