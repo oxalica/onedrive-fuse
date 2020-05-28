@@ -1,4 +1,7 @@
-use crate::{error::Result, util::de_duration_sec};
+use crate::{
+    error::{Error, Result},
+    util::de_duration_sec,
+};
 use onedrive_api::OneDrive;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -59,7 +62,7 @@ impl Statfs {
             .get_drive_with_option(ObjectOption::new().select(&[DriveField::quota]))
             .await?;
         let quota: Quota =
-            serde_json::from_value(*drive.quota.unwrap()).expect("Deserialize error");
+            serde_json::from_value(*drive.quota.unwrap()).map_err(Error::ApiDeserializeError)?;
         Ok(StatfsData {
             total: quota.total,
             free: quota.remaining,

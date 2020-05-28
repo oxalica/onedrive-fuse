@@ -1,4 +1,8 @@
-use crate::{error::Result, util::de_duration_sec, vfs::inode::InodePool};
+use crate::{
+    error::{Error, Result},
+    util::de_duration_sec,
+    vfs::inode::InodePool,
+};
 use onedrive_api::{ItemId, ItemLocation, OneDrive};
 use serde::Deserialize;
 use sharded_slab::{Clear, Pool};
@@ -171,10 +175,15 @@ impl DirPool {
         let offset = usize::try_from(offset).unwrap();
         let key = Self::fh_to_key(fh);
 
-        let entries = self.pool.get(key).expect("Invalid fh").entries.clone();
+        let entries = self
+            .pool
+            .get(key)
+            .ok_or(Error::InvalidHandle(fh))?
+            .entries
+            .clone();
         let mut entries = entries.lock().await;
         if entries.is_none() {
-            let item_id = self.pool.get(key).expect("Invalid fh").item_id.clone();
+            let item_id = self.pool.get(key).unwrap().item_id.clone();
             let fetcher = onedrive
                 .list_children_with_option(
                     ItemLocation::from_id(&item_id),

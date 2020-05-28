@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use onedrive_api::{ItemLocation, OneDrive};
 use serde::Deserialize;
 use std::{ffi::OsStr, time::Duration};
@@ -58,11 +58,8 @@ impl Vfs {
             .await
     }
 
-    pub async fn forget(&self, ino: u64, count: u64) {
-        self.inode_pool
-            .forget(ino, count)
-            .await
-            .expect("Invalid inode")
+    pub async fn forget(&self, ino: u64, count: u64) -> Result<()> {
+        self.inode_pool.forget(ino, count).await
     }
 
     pub async fn get_attr(&self, ino: u64, onedrive: &OneDrive) -> Result<(InodeAttr, Duration)> {
@@ -70,14 +67,17 @@ impl Vfs {
     }
 
     pub async fn open_dir(&self, ino: u64) -> Result<u64> {
-        let item_id = self.inode_pool.get_item_id(ino).expect("Invalid inode");
-        let cache = self.inode_pool.get_dir_cache(ino).expect("Invalid inode");
+        let item_id = self
+            .inode_pool
+            .get_item_id(ino)
+            .ok_or(Error::InvalidInode(ino))?;
+        let cache = self.inode_pool.get_dir_cache(ino).expect("Already checked");
         let fh = self.dir_pool.open(item_id, &cache);
         Ok(fh)
     }
 
-    pub async fn close_dir(&self, _ino: u64, fh: u64) {
-        self.dir_pool.free(fh).expect("Invalid fh");
+    pub async fn close_dir(&self, _ino: u64, fh: u64) -> Result<()> {
+        self.dir_pool.free(fh).ok_or(Error::InvalidHandle(fh))
     }
 
     pub async fn read_dir(

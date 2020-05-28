@@ -119,7 +119,7 @@ impl fuse::Filesystem for Filesystem {
     fn forget(&mut self, _req: &Request, ino: u64, nlookup: u64) {
         log::debug!("forget #{} nlookup={}", ino, nlookup);
         self.spawn(|inner| async move {
-            inner.vfs.forget(ino, nlookup).await;
+            inner.vfs.forget(ino, nlookup).await.unwrap();
         });
     }
 
@@ -153,7 +153,7 @@ impl fuse::Filesystem for Filesystem {
     fn releasedir(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, reply: ReplyEmpty) {
         log::debug!("releasedir #{} fh={}", ino, fh);
         self.spawn(|inner| async move {
-            inner.vfs.close_dir(ino, fh).await;
+            inner.vfs.close_dir(ino, fh).await.unwrap();
             reply.ok();
         });
     }

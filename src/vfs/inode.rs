@@ -200,7 +200,9 @@ impl InodePool {
         onedrive: &OneDrive,
     ) -> Result<(u64, InodeAttr, Duration)> {
         // Check from directory cache first.
-        let parent_item_id = self.get_item_id(parent_ino).expect("Invalid inode");
+        let parent_item_id = self
+            .get_item_id(parent_ino)
+            .ok_or(Error::InvalidInode(parent_ino))?;
         let child_name = cvt_filename(child_name)?;
         let (item_id, attr) = Self::get_attr_raw(
             ItemLocation::child_of_id(&parent_item_id, child_name),
@@ -219,8 +221,10 @@ impl InodePool {
         Ok((ino, attr, ttl))
     }
 
-    pub async fn forget(&self, ino: u64, count: u64) -> Option<()> {
-        self.free(self.ino_to_key(ino), count).await
+    pub async fn forget(&self, ino: u64, count: u64) -> Result<()> {
+        self.free(self.ino_to_key(ino), count)
+            .await
+            .ok_or(Error::InvalidInode(ino))
     }
 
     pub async fn get_attr(&self, ino: u64, onedrive: &OneDrive) -> Result<(InodeAttr, Duration)> {
@@ -230,7 +234,7 @@ impl InodePool {
         let cache = self
             .pool
             .get(key)
-            .expect("Invalid inode")
+            .ok_or(Error::InvalidInode(ino))?
             .attr_cache
             .clone();
         let mut cache = cache.lock().await;
@@ -242,7 +246,7 @@ impl InodePool {
 
         // Cache miss. Hold the mutex during the request.
         log::debug!("get_attr: cache miss");
-        let item_id = self.pool.get(key).expect("Invalid inode").item_id.clone();
+        let item_id = self.pool.get(key).expect("Already checked").item_id.clone();
         let (_, attr) = Self::get_attr_raw(ItemLocation::from_id(&item_id), onedrive).await?;
         // Fresh cache.
         *cache = Some((attr, Instant::now()));
@@ -265,5 +269,5 @@ impl InodePool {
 fn cvt_filename<'a>(name: &'a OsStr) -> Result<&'a FileName> {
     name.to_str()
         .and_then(FileName::new)
-        .ok_or(Error::InvalidArgument("Invalid filename"))
+        .ok_or_else(|| Error::InvalidFileName(name.to_owned()))
 }
