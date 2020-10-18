@@ -3,7 +3,11 @@ use crate::{
     util::de_duration_sec,
     vfs::dir,
 };
-use onedrive_api::{FileName, ItemId, ItemLocation, OneDrive};
+use onedrive_api::{
+    option::ObjectOption,
+    resource::{DriveItem, DriveItemField},
+    FileName, ItemId, ItemLocation, OneDrive,
+};
 use serde::Deserialize;
 use sharded_slab::{Clear, Pool};
 use std::{
@@ -32,6 +36,44 @@ pub struct InodeAttr {
     pub mtime: Timespec,
     pub crtime: Timespec,
     pub is_directory: bool,
+}
+
+impl InodeAttr {
+    const SELECT_FIELDS: &'static [DriveItemField] = &[
+        DriveItemField::id,
+        DriveItemField::size,
+        DriveItemField::last_modified_date_time,
+        DriveItemField::created_date_time,
+        DriveItemField::folder,
+    ];
+
+    async fn fetch(loc: ItemLocation<'_>, onedrive: &OneDrive) -> Result<(ItemId, InodeAttr)> {
+        // TODO: If-None-Match
+        let item = onedrive
+            .get_item_with_option(loc, ObjectOption::new().select(Self::SELECT_FIELDS))
+            .await?
+            .expect("No If-None-Match");
+        Self::parse_drive_item(&item)
+    }
+
+    fn parse_drive_item(item: &DriveItem) -> Result<(ItemId, InodeAttr)> {
+        fn parse_time(s: &str) -> Timespec {
+            // FIXME
+            time::strptime(s, "%Y-%m-%dT%H:%M:%S.%f%z")
+                .or_else(|_| time::strptime(s, "%Y-%m-%dT%H:%M:%S%z"))
+                .unwrap_or_else(|err| panic!("Invalid time '{}': {}", s, err))
+                .to_timespec()
+        }
+
+        let item_id = item.id.clone().unwrap();
+        let attr = InodeAttr {
+            size: item.size.unwrap() as u64,
+            mtime: parse_time(item.last_modified_date_time.as_deref().unwrap()),
+            crtime: parse_time(item.created_date_time.as_deref().unwrap()),
+            is_directory: item.folder.is_some(),
+        };
+        Ok((item_id, attr))
+    }
 }
 
 pub struct InodePool {
@@ -154,45 +196,6 @@ impl InodePool {
         self.key_to_ino(key)
     }
 
-    async fn get_attr_raw(
-        loc: ItemLocation<'_>,
-        onedrive: &OneDrive,
-    ) -> Result<(ItemId, InodeAttr)> {
-        use onedrive_api::{option::ObjectOption, resource::DriveItemField};
-
-        fn parse_time(s: &str) -> Timespec {
-            // FIXME
-            time::strptime(s, "%Y-%m-%dT%H:%M:%S.%f%z")
-                .or_else(|_| time::strptime(s, "%Y-%m-%dT%H:%M:%S%z"))
-                .unwrap_or_else(|err| panic!("Invalid time '{}': {}", s, err))
-                .to_timespec()
-        }
-
-        // TODO: If-None-Match
-        let item = onedrive
-            .get_item_with_option(
-                loc,
-                ObjectOption::new().select(&[
-                    DriveItemField::id,
-                    DriveItemField::size,
-                    DriveItemField::last_modified_date_time,
-                    DriveItemField::created_date_time,
-                    DriveItemField::folder,
-                ]),
-            )
-            .await?
-            .expect("No If-None-Match");
-
-        let item_id = item.id.unwrap();
-        let attr = InodeAttr {
-            size: item.size.unwrap() as u64,
-            mtime: parse_time(item.last_modified_date_time.as_deref().unwrap()),
-            crtime: parse_time(item.created_date_time.as_deref().unwrap()),
-            is_directory: item.folder.is_some(),
-        };
-        Ok((item_id, attr))
-    }
-
     pub async fn lookup(
         &self,
         parent_ino: u64,
@@ -204,7 +207,7 @@ impl InodePool {
             .get_item_id(parent_ino)
             .ok_or(Error::InvalidInode(parent_ino))?;
         let child_name = cvt_filename(child_name)?;
-        let (item_id, attr) = Self::get_attr_raw(
+        let (item_id, attr) = InodeAttr::fetch(
             ItemLocation::child_of_id(&parent_item_id, child_name),
             onedrive,
         )
@@ -247,7 +250,7 @@ impl InodePool {
         // Cache miss. Hold the mutex during the request.
         log::debug!("get_attr: cache miss");
         let item_id = self.pool.get(key).expect("Already checked").item_id.clone();
-        let (_, attr) = Self::get_attr_raw(ItemLocation::from_id(&item_id), onedrive).await?;
+        let (_, attr) = InodeAttr::fetch(ItemLocation::from_id(&item_id), onedrive).await?;
         // Fresh cache.
         *cache = Some((attr, Instant::now()));
 
