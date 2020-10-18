@@ -18,7 +18,6 @@ pub struct Filesystem {
 
 struct FilesystemInner {
     onedrive: OneDrive,
-    client: reqwest::Client,
     uid: u32,
     gid: u32,
     vfs: vfs::Vfs,
@@ -28,7 +27,6 @@ impl Filesystem {
     pub async fn new(onedrive: OneDrive, uid: u32, gid: u32, config: vfs::Config) -> Result<Self> {
         Ok(Self {
             inner: Arc::new(FilesystemInner {
-                client: reqwest::Client::new(),
                 uid,
                 gid,
                 vfs: vfs::Vfs::new(config, &onedrive).await?,

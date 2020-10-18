@@ -88,14 +88,15 @@ struct Inode {
     ref_count: AtomicU64,
     item_id: ItemId,
     attr_cache: Arc<Mutex<Option<(InodeAttr, Instant)>>>,
-    // FIXME: Remove this.
     dir_cache: dir::Cache,
 }
 
 impl Clear for Inode {
     fn clear(&mut self) {
-        // FIXME
-        *self = Default::default();
+        self.item_id.0.clear();
+        // Avoid pollution.
+        self.attr_cache = Default::default();
+        self.dir_cache.clear();
     }
 }
 
@@ -105,18 +106,6 @@ impl Default for Inode {
         Self {
             ref_count: 0.into(),
             item_id: ItemId(String::new()),
-            attr_cache: Default::default(),
-            dir_cache: Default::default(),
-        }
-    }
-}
-
-impl Inode {
-    // TODO: Initialize InodeAttrs.
-    fn new(item_id: ItemId) -> Self {
-        Self {
-            ref_count: 1.into(),
-            item_id,
             attr_cache: Default::default(),
             dir_cache: Default::default(),
         }
@@ -136,7 +125,7 @@ impl InodePool {
             config,
         };
         // Root has ref-count initialized at 1.
-        let root_key = ret.get_or_alloc(root_item_id).await;
+        let root_key = ret.acquire_or_alloc(root_item_id).await;
         ret.ino_shift = ROOT_INO - u64::try_from(root_key).unwrap();
         ret
     }
@@ -149,7 +138,9 @@ impl InodePool {
         usize::try_from(ino.wrapping_sub(self.ino_shift)).unwrap()
     }
 
-    async fn get_or_alloc(&self, item_id: ItemId) -> usize {
+    /// Allocate a new inode with 1 reference count, or return existing inode
+    /// with reference count increased by 1.
+    async fn acquire_or_alloc(&self, item_id: ItemId) -> usize {
         match self.rev_map.lock().await.entry(item_id) {
             Entry::Occupied(ent) => {
                 let key = *ent.get();
@@ -163,7 +154,12 @@ impl InodePool {
             Entry::Vacant(ent) => {
                 let key = self
                     .pool
-                    .create(|p| *p = Inode::new(ent.key().clone()))
+                    .create(|p| {
+                        p.ref_count = 1.into();
+                        p.item_id = ent.key().clone();
+                        // `attr_cache` is already empty.
+                        // `dir_cache` is already empty.
+                    })
                     .expect("Pool is full");
                 ent.insert(key);
                 key
@@ -171,8 +167,8 @@ impl InodePool {
         }
     }
 
-    async fn free(&self, key: usize, count: u64) -> Option<()> {
-        // Lock first to avoid race with get_or_alloc.
+    async fn free_key(&self, key: usize, count: u64) -> Option<()> {
+        // Lock first to avoid race with acquire_or_alloc.
         let mut rev_g = self.rev_map.lock().await;
         let g = self.pool.get(key)?;
         let orig_ref_count = g.ref_count.fetch_sub(count, Ordering::Relaxed);
@@ -191,8 +187,8 @@ impl InodePool {
     /// This is used in `readdir`.
     // TODO: Cache ItemId and InodeAttr.
     pub async fn touch(&self, item_id: ItemId) -> u64 {
-        let key = self.get_or_alloc(item_id).await;
-        self.free(key, 1).await.unwrap();
+        let key = self.acquire_or_alloc(item_id).await;
+        self.free_key(key, 1).await.unwrap();
         self.key_to_ino(key)
     }
 
@@ -202,18 +198,17 @@ impl InodePool {
         child_name: &OsStr,
         onedrive: &OneDrive,
     ) -> Result<(u64, InodeAttr, Duration)> {
-        // Check from directory cache first.
-        let parent_item_id = self
-            .get_item_id(parent_ino)
-            .ok_or(Error::InvalidInode(parent_ino))?;
+        // TODO: Check from directory cache first.
+        let parent_item_id = self.get_item_id(parent_ino)?;
         let child_name = cvt_filename(child_name)?;
+
+        // Fetch.
         let (item_id, attr) = InodeAttr::fetch(
             ItemLocation::child_of_id(&parent_item_id, child_name),
             onedrive,
         )
         .await?;
-
-        let key = self.get_or_alloc(item_id).await;
+        let key = self.acquire_or_alloc(item_id).await;
 
         // Fresh cache.
         let cache = self.pool.get(key).unwrap().attr_cache.clone();
@@ -224,8 +219,8 @@ impl InodePool {
         Ok((ino, attr, ttl))
     }
 
-    pub async fn forget(&self, ino: u64, count: u64) -> Result<()> {
-        self.free(self.ino_to_key(ino), count)
+    pub async fn free(&self, ino: u64, count: u64) -> Result<()> {
+        self.free_key(self.ino_to_key(ino), count)
             .await
             .ok_or(Error::InvalidInode(ino))
     }
@@ -258,14 +253,22 @@ impl InodePool {
         Ok((attr, ttl))
     }
 
-    // FIXME: Only used by DirPool.
-    pub fn get_item_id(&self, ino: u64) -> Option<ItemId> {
-        Some(self.pool.get(self.ino_to_key(ino))?.item_id.clone())
+    pub fn get_item_id(&self, ino: u64) -> Result<ItemId> {
+        Ok(self
+            .pool
+            .get(self.ino_to_key(ino))
+            .ok_or(Error::InvalidInode(ino))?
+            .item_id
+            .clone())
     }
 
-    // FIXME: Remove this.
-    pub fn get_dir_cache(&self, ino: u64) -> Option<dir::Cache> {
-        Some(self.pool.get(self.ino_to_key(ino))?.dir_cache.clone())
+    pub fn get_dir_cache(&self, ino: u64) -> Result<dir::Cache> {
+        Ok(self
+            .pool
+            .get(self.ino_to_key(ino))
+            .ok_or(Error::InvalidInode(ino))?
+            .dir_cache
+            .clone())
     }
 }
 

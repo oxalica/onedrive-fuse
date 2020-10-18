@@ -26,7 +26,7 @@ pub struct DirEntry {
 
 pub struct DirPool {
     config: Config,
-    pool: Arc<Pool<Dir>>,
+    pool: Arc<Pool<DirSnapshot>>,
 }
 
 #[derive(Deserialize)]
@@ -36,7 +36,7 @@ pub struct Config {
     entries_cache_ttl: Duration,
 }
 
-struct Dir {
+struct DirSnapshot {
     ref_count: AtomicU64,
     item_id: ItemId,
     /// FIXME: Remove `Arc`. https://github.com/hawkw/sharded-slab/issues/43
@@ -44,7 +44,7 @@ struct Dir {
 }
 
 // Required by `Pool`.
-impl Default for Dir {
+impl Default for DirSnapshot {
     fn default() -> Self {
         Self {
             ref_count: 0.into(),
@@ -54,7 +54,7 @@ impl Default for Dir {
     }
 }
 
-impl Clear for Dir {
+impl Clear for DirSnapshot {
     fn clear(&mut self) {
         self.item_id.0.clear();
         // Avoid pollution.
@@ -65,6 +65,13 @@ impl Clear for Dir {
 #[derive(Default, Clone)]
 pub struct Cache {
     last_fh: Arc<SyncMutex<Option<u64>>>,
+}
+
+impl Clear for Cache {
+    fn clear(&mut self) {
+        // Avoid pollution.
+        self.last_fh = Default::default();
+    }
 }
 
 impl DirPool {
@@ -90,6 +97,7 @@ impl DirPool {
             .create(|p| {
                 p.ref_count = ref_count.into();
                 p.item_id = item_id;
+                // `entries` is already empty.
             })
             .expect("Pool is full");
         let fh = Self::key_to_fh(key);
@@ -99,16 +107,15 @@ impl DirPool {
 
     /// Increase the ref-count of existing `fh`.
     /// `fh` must has at lease one reference during the calling.
-    fn alloc_exist(&self, fh: u64) -> Option<()> {
+    fn acquire(&self, fh: u64) -> Result<()> {
         let prev_ref_count = self
             .pool
-            .get(Self::fh_to_key(fh))?
+            .get(Self::fh_to_key(fh))
+            .ok_or(Error::InvalidHandle(fh))?
             .ref_count
-            // FIXME: Ordering.
-            .fetch_add(1, Ordering::SeqCst);
-        // We can only
+            .fetch_add(1, Ordering::Relaxed);
         assert_ne!(prev_ref_count, 0);
-        Some(())
+        Ok(())
     }
 
     pub fn open(&self, item_id: ItemId, cache: &Cache) -> u64 {
@@ -119,7 +126,7 @@ impl DirPool {
 
         let mut last_fh = cache.last_fh.lock().unwrap();
         if let Some(fh) = *last_fh {
-            self.alloc_exist(fh).unwrap();
+            self.acquire(fh).unwrap();
             return fh;
         }
 
@@ -147,20 +154,24 @@ impl DirPool {
         fh
     }
 
-    pub fn free(&self, fh: u64) -> Option<()> {
+    pub fn free(&self, fh: u64) -> Result<()> {
         Self::free_inner(&self.pool, fh)
     }
 
-    fn free_inner(pool: &Pool<Dir>, fh: u64) -> Option<()> {
+    fn free_inner(pool: &Pool<DirSnapshot>, fh: u64) -> Result<()> {
         let key = Self::fh_to_key(fh);
-        let prev_count = pool.get(key)?.ref_count.fetch_sub(1, Ordering::Relaxed);
+        let prev_count = pool
+            .get(key)
+            .ok_or(Error::InvalidHandle(fh))?
+            .ref_count
+            .fetch_sub(1, Ordering::Relaxed);
         assert_ne!(prev_count, 0);
         if prev_count == 1 {
             // Since it is the last handle, no one can race us with increasement.
             assert!(pool.clear(key));
             log::debug!("release dir fh={}", fh);
         }
-        Some(())
+        Ok(())
     }
 
     pub async fn read(
