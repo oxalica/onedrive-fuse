@@ -72,12 +72,12 @@ impl FilesystemInner {
 
 impl fuse::Filesystem for Filesystem {
     fn init(&mut self, _req: &Request) -> std::result::Result<(), libc::c_int> {
-        log::info!("initialize");
+        log::info!("FUSE initialized");
         Ok(())
     }
 
     fn destroy(&mut self, _req: &Request) {
-        log::info!("destroy");
+        log::info!("FUSE destroyed");
     }
 
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
