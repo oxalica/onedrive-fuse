@@ -2,7 +2,11 @@ use anyhow::{Context as _, Result};
 use nix::unistd::{getgid, getuid};
 use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+use structopt::StructOpt;
 
 mod error;
 mod fuse_fs;
@@ -13,84 +17,95 @@ mod vfs;
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let args = match parse_args() {
-        Ok(args) => args,
-        Err(err) => {
-            eprintln!("{}", err);
-            print_help();
-            std::process::exit(1);
-        }
+    let opt: Opt = Opt::from_args();
+    match opt {
+        Opt::Mount(opt) => main_mount(opt).await,
+    }
+}
+
+async fn main_mount(opt: OptMount) -> Result<()> {
+    let credential: Credential = {
+        let path = opt
+            .credential
+            .or_else(default_credential_path)
+            .context("No credential file provided")?;
+        let f = fs::File::open(&path).context("Cannot open credential file")?;
+        serde_json::from_reader(f).context("Invalid credential file")?
     };
 
-    let config: Config = {
-        let f = std::fs::File::open(&args.config_file).context("Cannot open config file")?;
-        serde_json::from_reader(f).context("Invalid config file")?
-    };
+    let config = load_vfs_config(opt.config.as_deref())?;
 
     let auth = Auth::new(
-        config.client_id.clone(),
+        credential.client_id.clone(),
         Permission::new_read().offline_access(true),
-        config.redirect_uri,
+        credential.redirect_uri,
     );
     let tokens = auth
-        .login_with_refresh_token(&config.refresh_token, None)
+        .login_with_refresh_token(&credential.refresh_token, None)
         .await?;
+    // TODO: Save new refresh token.
     let onedrive = OneDrive::new(tokens.access_token, DriveLocation::me());
 
     let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
-    let config = load_vfs_config()?;
     let fs = fuse_fs::Filesystem::new(onedrive, uid, gid, config)
         .await
-        .expect("Cannot initialize vfs");
-    tokio::task::spawn_blocking(move || fuse::mount(fs, &args.mount_point, &[])).await??;
+        .context("Cannot initialize vfs")?;
+    let mount_point = opt.mount_point;
+    tokio::task::spawn_blocking(move || fuse::mount(fs, &mount_point, &[])).await??;
     Ok(())
 }
 
-// TODO: Load custom config.
-fn load_vfs_config() -> Result<vfs::Config> {
+fn load_vfs_config(config: Option<&Path>) -> Result<vfs::Config> {
     use config::{Config, File, FileFormat};
     const DEFAULT_CONFIG: &str = include_str!("../config.default.toml");
 
     let mut conf = Config::new();
     conf.merge(File::from_str(DEFAULT_CONFIG, FileFormat::Toml))?;
+    if let Some(path) = config {
+        let path = path.to_str().context("Invalid config file path")?;
+        conf.merge(File::new(path, FileFormat::Toml))?;
+    }
     Ok(conf.try_into()?)
 }
 
-#[derive(Debug)]
-struct Args {
-    config_file: PathBuf,
-    mount_point: PathBuf,
-}
-
-fn parse_args() -> Result<Args> {
-    let mut args = pico_args::Arguments::from_env();
-    let ret = Args {
-        config_file: args.free_from_str()?.context("Missing config path")?,
-        mount_point: args.free_from_str()?.context("Missing mount point")?,
-    };
-    args.finish()?;
-    Ok(ret)
-}
-
-fn print_help() {
-    eprint!(
-        r"
-USAGE: {exe_name} <config_file> <mount_point>
-
-Mount OneDrive storage as FUSE filesystem.
-
-Copyright (C) 2019 {authors}
-This is free software; see the source for copying conditions.  There is NO
-warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-",
-        authors = env!("CARGO_PKG_AUTHORS"),
-        exe_name = std::env::args().next().unwrap(),
-    );
-}
-
 #[derive(Deserialize)]
-struct Config {
+struct Credential {
     client_id: String,
     redirect_uri: String,
     refresh_token: String,
+}
+
+#[derive(Debug, StructOpt)]
+#[structopt(about = "Mount OneDrive storage as FUSE filesystem.")]
+#[structopt(after_help = concat!("\
+Copyright (C) 2019-2020 ", env!("CARGO_PKG_AUTHORS"), "
+This is free software; see the source for copying conditions. There is NO warranty;
+not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+"))]
+enum Opt {
+    /// Mount OneDrive storage.
+    Mount(OptMount),
+}
+
+#[derive(Debug, StructOpt)]
+struct OptMount {
+    /// Secret credential file to login OneDrive account.
+    /// Default to be `$HOME/.onedrive_fuse/credential.json`.
+    #[structopt(short, long, parse(from_os_str))]
+    credential: Option<PathBuf>,
+
+    /// Optional config file to adjust internal settings.
+    #[structopt(long, parse(from_os_str))]
+    config: Option<PathBuf>,
+
+    /// Mount point.
+    #[structopt(parse(from_os_str))]
+    mount_point: PathBuf,
+}
+
+fn default_credential_path() -> Option<PathBuf> {
+    let mut path = PathBuf::from(env::var("HOME").ok()?);
+    path.push(".onedrive_fuse");
+    path.push("credential.json");
+    Some(path)
 }
