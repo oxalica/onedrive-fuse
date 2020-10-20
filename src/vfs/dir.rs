@@ -1,5 +1,6 @@
 use crate::{
     error::{Error, Result},
+    util::de_duration_sec,
     vfs::inode,
 };
 use lru_cache::LruCache;
@@ -13,6 +14,7 @@ use std::{
     convert::TryFrom,
     ffi::OsString,
     sync::{Arc, Mutex as SyncMutex},
+    time::{Duration, Instant},
 };
 
 #[derive(Clone)]
@@ -25,12 +27,17 @@ pub struct DirEntry {
 #[derive(Deserialize)]
 pub struct Config {
     lru_cache_size: usize,
+    #[serde(deserialize_with = "de_duration_sec")]
+    cache_ttl: Duration,
 }
 
 pub struct DirPool {
     opened_handles: Slab<Arc<DirSnapshot>>,
     /// Inode -> DirSnapshot
-    lru_cache: SyncMutex<LruCache<u64, Arc<DirSnapshot>>>,
+    ///
+    /// `Instant` for last checked time.
+    lru_cache: SyncMutex<LruCache<u64, (Arc<DirSnapshot>, Instant)>>,
+    config: Config,
 }
 
 struct DirSnapshot {
@@ -45,6 +52,7 @@ impl DirPool {
         Self {
             opened_handles: Slab::new(),
             lru_cache: SyncMutex::new(LruCache::new(config.lru_cache_size)),
+            config,
         }
     }
 
@@ -68,44 +76,70 @@ impl DirPool {
         onedrive: &OneDrive,
     ) -> Result<u64> {
         // Check directory content cache of the given inode.
-        if let Some(snapshot) = self.lru_cache.lock().unwrap().get_mut(&ino).cloned() {
-            return Ok(Self::key_to_fh(self.alloc(snapshot)));
-        }
-
-        log::debug!("open_dir: cache miss");
+        let prev_snapshot = match self.lru_cache.lock().unwrap().get_mut(&ino).cloned() {
+            // Cache hit.
+            Some((snapshot, last_checked)) if last_checked.elapsed() < self.config.cache_ttl => {
+                return Ok(Self::key_to_fh(self.alloc(snapshot)))
+            }
+            // Cache outdated. Need re-check.
+            Some((snapshot, _)) => {
+                log::debug!("open_dir: cache outdated");
+                Some(snapshot)
+            }
+            // No cache found.
+            None => {
+                log::debug!("open_dir: cache miss");
+                None
+            }
+        };
 
         // FIXME: Incremental fetching.
-        let dir = onedrive
-            .get_item_with_option(
-                ItemLocation::from_id(&item_id),
-                ObjectOption::new()
-                    .select(&[
-                        // `id` is required, or we'll get 400 Bad Request.
-                        DriveItemField::id,
-                        DriveItemField::c_tag,
-                        DriveItemField::children,
-                    ])
-                    .expand(
-                        DriveItemField::children,
-                        // FIXME: Use `DriveItemField`.
-                        Some(&[
-                            "name",
-                            // For InodeAttr.
-                            "id",
-                            "size",
-                            "lastModifiedDateTime",
-                            "createdDateTime",
-                            "folder",
-                        ]),
-                    ),
-            )
-            .await?
-            .expect("No If-None-Match");
+        let mut opt = ObjectOption::new()
+            .select(&[
+                // `id` is required, or we'll get 400 Bad Request.
+                DriveItemField::id,
+                DriveItemField::c_tag,
+                DriveItemField::children,
+            ])
+            .expand(
+                DriveItemField::children,
+                // FIXME: Use `DriveItemField`.
+                Some(&[
+                    "name",
+                    // For InodeAttr.
+                    "id",
+                    "size",
+                    "lastModifiedDateTime",
+                    "createdDateTime",
+                    "folder",
+                ]),
+            );
+        if let Some(prev) = &prev_snapshot {
+            opt = opt.if_none_match(&prev.c_tag);
+        }
+        let ret = onedrive
+            .get_item_with_option(ItemLocation::from_id(&item_id), opt)
+            .await?;
+        let fetch_time = Instant::now();
 
-        let c_tag = dir.c_tag.unwrap();
+        let dir_item = match ret {
+            Some(item) => item,
+            None => {
+                // Content not changed. Reuse the cache.
+                log::debug!("open_dir: cache not modified, refresh");
+                let prev_snapshot = prev_snapshot.unwrap();
+                self.lru_cache
+                    .lock()
+                    .unwrap()
+                    .insert(ino, (prev_snapshot.clone(), fetch_time));
+                return Ok(Self::key_to_fh(self.alloc(prev_snapshot)));
+            }
+        };
+
+        let c_tag = dir_item.c_tag.unwrap();
 
         let mut entries = Vec::new();
-        for item in dir.children.unwrap() {
+        for item in dir_item.children.unwrap() {
             let (child_id, child_attr) =
                 inode::InodeAttr::parse_drive_item(&item).expect("Invalid DriveItem");
             let ino = inode_pool.touch(child_id).await;
@@ -129,7 +163,10 @@ impl DirPool {
             name_map,
         });
 
-        self.lru_cache.lock().unwrap().insert(ino, snapshot.clone());
+        self.lru_cache
+            .lock()
+            .unwrap()
+            .insert(ino, (snapshot.clone(), fetch_time));
         Ok(Self::key_to_fh(self.alloc(snapshot)))
     }
 
