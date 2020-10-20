@@ -1,21 +1,19 @@
 use crate::{
     error::{Error, Result},
-    util::de_duration_sec,
-    vfs::inode::InodePool,
+    vfs::inode,
 };
-use onedrive_api::{ItemId, ItemLocation, OneDrive};
+use lru_cache::LruCache;
+use onedrive_api::{
+    option::ObjectOption, resource::DriveItemField, ItemId, ItemLocation, OneDrive, Tag,
+};
 use serde::Deserialize;
-use sharded_slab::{Clear, Pool};
+use sharded_slab::Slab;
 use std::{
+    collections::HashMap,
     convert::TryFrom,
     ffi::OsString,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex as SyncMutex,
-    },
-    time::Duration,
+    sync::{Arc, Mutex as SyncMutex},
 };
-use tokio::{sync::Mutex, task::spawn, time::delay_for};
 
 #[derive(Clone)]
 pub struct DirEntry {
@@ -24,61 +22,29 @@ pub struct DirEntry {
     pub is_directory: bool,
 }
 
-pub struct DirPool {
-    config: Config,
-    pool: Arc<Pool<DirSnapshot>>,
-}
-
 #[derive(Deserialize)]
 pub struct Config {
-    fetch_page_size: std::num::NonZeroUsize,
-    #[serde(deserialize_with = "de_duration_sec")]
-    entries_cache_ttl: Duration,
+    lru_cache_size: usize,
+}
+
+pub struct DirPool {
+    opened_handles: Slab<Arc<DirSnapshot>>,
+    /// Inode -> DirSnapshot
+    lru_cache: SyncMutex<LruCache<u64, Arc<DirSnapshot>>>,
 }
 
 struct DirSnapshot {
-    ref_count: AtomicU64,
-    item_id: ItemId,
-    /// FIXME: Remove `Arc`. https://github.com/hawkw/sharded-slab/issues/43
-    entries: Arc<Mutex<Option<Vec<DirEntry>>>>,
-}
-
-// Required by `Pool`.
-impl Default for DirSnapshot {
-    fn default() -> Self {
-        Self {
-            ref_count: 0.into(),
-            item_id: ItemId(String::new()),
-            entries: Default::default(),
-        }
-    }
-}
-
-impl Clear for DirSnapshot {
-    fn clear(&mut self) {
-        self.item_id.0.clear();
-        // Avoid pollution.
-        self.entries = Default::default();
-    }
-}
-
-#[derive(Default, Clone)]
-pub struct Cache {
-    last_fh: Arc<SyncMutex<Option<u64>>>,
-}
-
-impl Clear for Cache {
-    fn clear(&mut self) {
-        // Avoid pollution.
-        self.last_fh = Default::default();
-    }
+    c_tag: Tag,
+    entries: Vec<DirEntry>,
+    /// name -> index of `entries`
+    name_map: HashMap<String, usize>,
 }
 
 impl DirPool {
     pub fn new(config: Config) -> Self {
         Self {
-            config,
-            pool: Default::default(),
+            opened_handles: Slab::new(),
+            lru_cache: SyncMutex::new(LruCache::new(config.lru_cache_size)),
         }
     }
 
@@ -90,144 +56,99 @@ impl DirPool {
         usize::try_from(fh).unwrap()
     }
 
-    fn alloc(&self, item_id: ItemId, ref_count: u64) -> u64 {
-        assert_ne!(ref_count, 0);
-        let key = self
-            .pool
-            .create(|p| {
-                p.ref_count = ref_count.into();
-                p.item_id = item_id;
-                // `entries` is already empty.
-            })
-            .expect("Pool is full");
-        let fh = Self::key_to_fh(key);
-        log::debug!("alloc dir fh={}", fh);
-        fh
+    fn alloc(&self, snapshot: Arc<DirSnapshot>) -> usize {
+        self.opened_handles.insert(snapshot).expect("Pool is full")
     }
 
-    /// Increase the ref-count of existing `fh`.
-    /// `fh` must has at lease one reference during the calling.
-    fn acquire(&self, fh: u64) -> Result<()> {
-        let prev_ref_count = self
-            .pool
-            .get(Self::fh_to_key(fh))
-            .ok_or(Error::InvalidHandle(fh))?
-            .ref_count
-            .fetch_add(1, Ordering::Relaxed);
-        assert_ne!(prev_ref_count, 0);
-        Ok(())
-    }
-
-    pub fn open(&self, item_id: ItemId, cache: &Cache) -> u64 {
-        let ttl = self.config.entries_cache_ttl;
-        if ttl == Duration::new(0, 0) {
-            return self.alloc(item_id, 1);
+    pub async fn open(
+        &self,
+        ino: u64,
+        item_id: ItemId,
+        inode_pool: &inode::InodePool,
+        onedrive: &OneDrive,
+    ) -> Result<u64> {
+        // Check directory content cache of the given inode.
+        if let Some(snapshot) = self.lru_cache.lock().unwrap().get_mut(&ino).cloned() {
+            return Ok(Self::key_to_fh(self.alloc(snapshot)));
         }
 
-        let mut last_fh = cache.last_fh.lock().unwrap();
-        if let Some(fh) = *last_fh {
-            self.acquire(fh).unwrap();
-            return fh;
-        }
-
-        // `last_dir_fh` is `None` here.
         log::debug!("open_dir: cache miss");
-        // Also referenced by `last_dir_fh`.
-        let fh = self.alloc(item_id, 2);
-        *last_fh = Some(fh);
 
-        // Set timeout to expire and release the cache.
-        let last_fh_arc = cache.last_fh.clone();
-        let pool_arc = self.pool.clone();
-        spawn(async move {
-            delay_for(ttl).await;
-            let mut guard = last_fh_arc.lock().unwrap();
-            // `last_dir_fh` will not be modified unless it is `None`.
-            // So it should be kept during the TTL.
-            assert_eq!(*guard, Some(fh));
-            *guard = None;
-            // Note that this `free` just decreases ref-count. `fh` may still be alive outside.
-            // For example, `open_dir` and keep `fh` for more than cache TTL.
-            Self::free_inner(&pool_arc, fh).unwrap();
+        // FIXME: Incremental fetching.
+        let dir = onedrive
+            .get_item_with_option(
+                ItemLocation::from_id(&item_id),
+                ObjectOption::new()
+                    .select(&[
+                        // `id` is required, or we'll get 400 Bad Request.
+                        DriveItemField::id,
+                        DriveItemField::c_tag,
+                        DriveItemField::children,
+                    ])
+                    .expand(
+                        DriveItemField::children,
+                        // FIXME: Use `DriveItemField`.
+                        Some(&[
+                            "name",
+                            // For InodeAttr.
+                            "id",
+                            "size",
+                            "lastModifiedDateTime",
+                            "createdDateTime",
+                            "folder",
+                        ]),
+                    ),
+            )
+            .await?
+            .expect("No If-None-Match");
+
+        let c_tag = dir.c_tag.unwrap();
+
+        let mut entries = Vec::new();
+        for item in dir.children.unwrap() {
+            let (child_id, child_attr) =
+                inode::InodeAttr::parse_drive_item(&item).expect("Invalid DriveItem");
+            let ino = inode_pool.touch(child_id).await;
+            // FIXME: Cache InodeAttr.
+            entries.push(DirEntry {
+                ino,
+                name: item.name.unwrap().into(),
+                is_directory: child_attr.is_directory,
+            });
+        }
+
+        let name_map = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, ent)| (ent.name.to_str().unwrap().to_owned(), idx))
+            .collect();
+
+        let snapshot = Arc::new(DirSnapshot {
+            c_tag,
+            entries,
+            name_map,
         });
 
-        fh
+        self.lru_cache.lock().unwrap().insert(ino, snapshot.clone());
+        Ok(Self::key_to_fh(self.alloc(snapshot)))
     }
 
     pub fn free(&self, fh: u64) -> Result<()> {
-        Self::free_inner(&self.pool, fh)
-    }
-
-    fn free_inner(pool: &Pool<DirSnapshot>, fh: u64) -> Result<()> {
-        let key = Self::fh_to_key(fh);
-        let prev_count = pool
-            .get(key)
-            .ok_or(Error::InvalidHandle(fh))?
-            .ref_count
-            .fetch_sub(1, Ordering::Relaxed);
-        assert_ne!(prev_count, 0);
-        if prev_count == 1 {
-            // Since it is the last handle, no one can race us with increasement.
-            assert!(pool.clear(key));
-            log::debug!("release dir fh={}", fh);
+        if self.opened_handles.remove(Self::fh_to_key(fh)) {
+            Ok(())
+        } else {
+            Err(Error::InvalidHandle(fh))
         }
-        Ok(())
     }
 
-    pub async fn read(
-        &self,
-        fh: u64,
-        offset: u64,
-        inode_pool: &InodePool,
-        onedrive: &OneDrive,
-    ) -> Result<impl AsRef<[DirEntry]>> {
-        use onedrive_api::{option::CollectionOption, resource::DriveItemField};
-
-        let offset = usize::try_from(offset).unwrap();
-        let key = Self::fh_to_key(fh);
-
-        let entries = self
-            .pool
-            .get(key)
+    pub async fn read(&self, fh: u64, offset: u64) -> Result<impl AsRef<[DirEntry]>> {
+        let snapshot = self
+            .opened_handles
+            .get(Self::fh_to_key(fh))
             .ok_or(Error::InvalidHandle(fh))?
-            .entries
             .clone();
-        let mut entries = entries.lock().await;
-        if entries.is_none() {
-            let item_id = self.pool.get(key).unwrap().item_id.clone();
-            let fetcher = onedrive
-                .list_children_with_option(
-                    ItemLocation::from_id(&item_id),
-                    CollectionOption::new()
-                        .select(&[
-                            DriveItemField::id,
-                            DriveItemField::name,
-                            DriveItemField::folder,
-                        ])
-                        .page_size(self.config.fetch_page_size.get()),
-                )
-                .await?
-                .expect("No If-Non-Match");
 
-            // TODO: Incremental fetch.
-            let items = fetcher.fetch_all(onedrive).await?;
-
-            let mut ret = Vec::with_capacity(items.len());
-            for item in items {
-                let item_id = item.id.unwrap();
-                // TODO: Cache inode attrs.
-                let ino = inode_pool.touch(item_id).await;
-                ret.push(DirEntry {
-                    ino,
-                    name: item.name.unwrap().into(),
-                    is_directory: item.folder.is_some(),
-                });
-            }
-
-            *entries = Some(ret);
-        }
-
-        // TODO: Avoid copy.
-        Ok(entries.as_ref().unwrap()[offset..].to_vec())
+        // FIXME: Avoid copy.
+        Ok(snapshot.entries[offset as usize..].to_owned())
     }
 }

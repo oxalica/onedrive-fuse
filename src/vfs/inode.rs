@@ -1,7 +1,6 @@
 use crate::{
     error::{Error, Result},
     util::de_duration_sec,
-    vfs::dir,
 };
 use onedrive_api::{
     option::ObjectOption,
@@ -56,7 +55,7 @@ impl InodeAttr {
         Self::parse_drive_item(&item)
     }
 
-    fn parse_drive_item(item: &DriveItem) -> Result<(ItemId, InodeAttr)> {
+    pub fn parse_drive_item(item: &DriveItem) -> Result<(ItemId, InodeAttr)> {
         fn parse_time(s: &str) -> Timespec {
             // FIXME
             time::strptime(s, "%Y-%m-%dT%H:%M:%S.%f%z")
@@ -88,7 +87,6 @@ struct Inode {
     ref_count: AtomicU64,
     item_id: ItemId,
     attr_cache: Arc<Mutex<Option<(InodeAttr, Instant)>>>,
-    dir_cache: dir::Cache,
 }
 
 impl Clear for Inode {
@@ -96,7 +94,6 @@ impl Clear for Inode {
         self.item_id.0.clear();
         // Avoid pollution.
         self.attr_cache = Default::default();
-        self.dir_cache.clear();
     }
 }
 
@@ -107,7 +104,6 @@ impl Default for Inode {
             ref_count: 0.into(),
             item_id: ItemId(String::new()),
             attr_cache: Default::default(),
-            dir_cache: Default::default(),
         }
     }
 }
@@ -259,15 +255,6 @@ impl InodePool {
             .get(self.ino_to_key(ino))
             .ok_or(Error::InvalidInode(ino))?
             .item_id
-            .clone())
-    }
-
-    pub fn get_dir_cache(&self, ino: u64) -> Result<dir::Cache> {
-        Ok(self
-            .pool
-            .get(self.ino_to_key(ino))
-            .ok_or(Error::InvalidInode(ino))?
-            .dir_cache
             .clone())
     }
 }

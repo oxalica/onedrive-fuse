@@ -66,10 +66,12 @@ impl Vfs {
         self.inode_pool.get_attr(ino, onedrive).await
     }
 
-    pub async fn open_dir(&self, ino: u64) -> Result<u64> {
+    pub async fn open_dir(&self, ino: u64, onedrive: &OneDrive) -> Result<u64> {
         let item_id = self.inode_pool.get_item_id(ino)?;
-        let cache = self.inode_pool.get_dir_cache(ino).expect("Already checked");
-        let fh = self.dir_pool.open(item_id, &cache);
+        let fh = self
+            .dir_pool
+            .open(ino, item_id, &self.inode_pool, &onedrive)
+            .await?;
         Ok(fh)
     }
 
@@ -82,10 +84,7 @@ impl Vfs {
         _ino: u64,
         fh: u64,
         offset: u64,
-        onedrive: &OneDrive,
     ) -> Result<impl AsRef<[DirEntry]>> {
-        self.dir_pool
-            .read(fh, offset, &self.inode_pool, onedrive)
-            .await
+        self.dir_pool.read(fh, offset).await
     }
 }

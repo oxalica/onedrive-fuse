@@ -138,7 +138,7 @@ impl fuse::Filesystem for Filesystem {
     fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         // FIXME: Check flags?
         self.spawn(|inner| async move {
-            match inner.vfs.open_dir(ino).await {
+            match inner.vfs.open_dir(ino, &inner.onedrive).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok(fh) => {
                     log::debug!("opendir #{} flags=0x{:X}(0o{1:o}) -> {}", ino, flags, fh);
@@ -166,7 +166,7 @@ impl fuse::Filesystem for Filesystem {
     ) {
         let offset = u64::try_from(offset).unwrap();
         self.spawn(|inner| async move {
-            match inner.vfs.read_dir(ino, fh, offset, &inner.onedrive).await {
+            match inner.vfs.read_dir(ino, fh, offset).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok(entries) => {
                     let mut count = 0usize;
