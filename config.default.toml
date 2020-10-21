@@ -2,7 +2,10 @@
 cache_ttl = 30
 
 [inode]
+# Cache timeout for inode metadata.
 attr_cache_ttl = 30
+# Size of LRU cache of inode metadata which are not referenced.
+dead_lru_cache_size = 4096
 
 [dir]
 # Size of LRU cache of contents of directories.

@@ -1,5 +1,5 @@
 use crate::error::Result;
-use onedrive_api::{ItemLocation, OneDrive};
+use onedrive_api::OneDrive;
 use serde::Deserialize;
 use std::{ffi::OsStr, time::Duration};
 
@@ -25,20 +25,9 @@ pub struct Vfs {
 
 impl Vfs {
     pub async fn new(config: Config, onedrive: &OneDrive) -> Result<Self> {
-        use onedrive_api::{option::ObjectOption, resource::DriveItemField};
-        let root_item_id = onedrive
-            .get_item_with_option(
-                ItemLocation::root(),
-                ObjectOption::new().select(&[DriveItemField::id]),
-            )
-            .await?
-            .expect("No If-None-Match")
-            .id
-            .expect("`id` is selected");
-
         Ok(Self {
             statfs: statfs::Statfs::new(config.statfs),
-            inode_pool: inode::InodePool::new(root_item_id, config.inode).await,
+            inode_pool: inode::InodePool::new(config.inode, onedrive).await?,
             dir_pool: dir::DirPool::new(config.dir),
         })
     }

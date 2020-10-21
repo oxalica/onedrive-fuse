@@ -142,10 +142,10 @@ impl DirPool {
         for item in dir_item.children.unwrap() {
             let (child_id, child_attr) =
                 inode::InodeAttr::parse_drive_item(&item).expect("Invalid DriveItem");
-            let ino = inode_pool.touch(child_id).await;
-            // FIXME: Cache InodeAttr.
+            inode_pool.touch(&child_id, child_attr, fetch_time).await;
             entries.push(DirEntry {
-                ino,
+                // Meaningless but should be non-zero.
+                ino: u64::MAX,
                 name: item.name.unwrap().into(),
                 is_directory: child_attr.is_directory,
             });
