@@ -1,12 +1,15 @@
-use crate::{error::Result, login::ManagedOnedrive};
+use crate::login::ManagedOnedrive;
 use onedrive_api::OneDrive;
 use serde::Deserialize;
 use std::{ffi::OsStr, ops::Deref, time::Duration};
 
 mod dir;
+pub mod error;
 mod inode;
 mod statfs;
+
 pub use dir::DirEntry;
+pub use error::{Error, Result};
 pub use inode::InodeAttr;
 pub use statfs::StatfsData;
 

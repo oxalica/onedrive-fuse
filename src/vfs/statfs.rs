@@ -1,6 +1,6 @@
 use crate::{
-    error::{Error, Result},
     util::de_duration_sec,
+    vfs::error::{Error, Result},
 };
 use onedrive_api::OneDrive;
 use serde::Deserialize;

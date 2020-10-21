@@ -1,7 +1,9 @@
 use crate::{
-    error::{Error, Result},
     util::de_duration_sec,
-    vfs::dir,
+    vfs::{
+        dir,
+        error::{Error, Result},
+    },
 };
 use lru_cache::LruCache;
 use onedrive_api::{

@@ -1,4 +1,4 @@
-use crate::{error::IntoCError as _, vfs};
+use crate::vfs;
 use fuse::*;
 use std::{convert::TryFrom as _, ffi::OsStr, sync::Arc};
 use time::Timespec;

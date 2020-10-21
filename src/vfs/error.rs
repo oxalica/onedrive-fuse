@@ -35,13 +35,8 @@ impl From<onedrive_api::Error> for Error {
     }
 }
 
-pub trait IntoCError {
-    /// Log internal error if needed and return errno.
-    fn into_c_err(self) -> libc::c_int;
-}
-
-impl IntoCError for Error {
-    fn into_c_err(self) -> libc::c_int {
+impl Error {
+    pub fn into_c_err(self) -> libc::c_int {
         match &self {
             Self::NotFound => libc::ENOENT,
             Self::InvalidFileName(_) => {

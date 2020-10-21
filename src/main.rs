@@ -9,7 +9,6 @@ use std::{
 };
 use structopt::StructOpt;
 
-mod error;
 mod fuse_fs;
 mod login;
 mod util;
