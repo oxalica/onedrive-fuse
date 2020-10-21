@@ -135,6 +135,10 @@ impl fuse::Filesystem for Filesystem {
         });
     }
 
+    fn access(&mut self, _req: &Request, _ino: u64, _mask: u32, reply: ReplyEmpty) {
+        reply.ok();
+    }
+
     fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         // FIXME: Check flags?
         self.spawn(|inner| async move {

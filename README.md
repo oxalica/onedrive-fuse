@@ -17,7 +17,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
 
 - [ ] FUSE syscalls
   - [ ] Read
-    - [ ] access
+    - [x] access
     - [x] forget
     - [x] getattr
     - [x] lookup
