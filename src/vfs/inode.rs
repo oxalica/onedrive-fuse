@@ -197,7 +197,11 @@ impl InodePool {
             }
         };
         // We cannot use `await` when holding guard.
-        *node.attr.lock().await = (attr, fetch_time);
+        let mut cache = node.attr.lock().await;
+        // Only update if later.
+        if cache.1 < fetch_time {
+            *cache = (attr, fetch_time);
+        }
     }
 
     /// Update InodeAttr of existing inode or allocate a new inode,
