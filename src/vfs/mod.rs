@@ -43,7 +43,7 @@ impl Vfs {
         onedrive: &OneDrive,
     ) -> Result<(u64, InodeAttr, Duration)> {
         self.inode_pool
-            .lookup(parent_ino, child_name, onedrive)
+            .lookup(parent_ino, child_name, &self.dir_pool, onedrive)
             .await
     }
 

@@ -19,9 +19,9 @@ use std::{
 
 #[derive(Clone)]
 pub struct DirEntry {
-    pub ino: u64,
+    pub item_id: ItemId,
     pub name: OsString,
-    pub is_directory: bool,
+    pub attr: inode::InodeAttr,
 }
 
 #[derive(Deserialize)]
@@ -144,10 +144,9 @@ impl DirPool {
                 inode::InodeAttr::parse_drive_item(&item).expect("Invalid DriveItem");
             inode_pool.touch(&child_id, child_attr, fetch_time).await;
             entries.push(DirEntry {
-                // Meaningless but should be non-zero.
-                ino: u64::MAX,
+                item_id: child_id,
                 name: item.name.unwrap().into(),
-                is_directory: child_attr.is_directory,
+                attr: child_attr,
             });
         }
 
@@ -187,5 +186,28 @@ impl DirPool {
 
         // FIXME: Avoid copy.
         Ok(snapshot.entries[offset as usize..].to_owned())
+    }
+
+    /// Lookup name of a directory in cache and return DirEntry and TTL.
+    ///
+    /// `None` for cache miss.
+    /// `Some(None) for not found.
+    /// `Some(Some(_))` for found.
+    pub async fn lookup(
+        &self,
+        parent_ino: u64,
+        name: &str,
+    ) -> Option<Option<(DirEntry, Duration)>> {
+        let mut cache = self.lru_cache.lock().unwrap();
+        if let Some((snapshot, last_fetch_time)) = cache.get_mut(&parent_ino) {
+            if let Some(ttl) = self.config.cache_ttl.checked_sub(last_fetch_time.elapsed()) {
+                let ret = snapshot
+                    .name_map
+                    .get(name)
+                    .map(|&idx| (snapshot.entries[idx].clone(), ttl));
+                return Some(ret);
+            }
+        }
+        None
     }
 }

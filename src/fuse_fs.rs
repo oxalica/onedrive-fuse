@@ -176,13 +176,15 @@ impl fuse::Filesystem for Filesystem {
                             .unwrap()
                             .checked_add(1)
                             .unwrap();
-                        let kind = if entry.is_directory {
+                        let kind = if entry.attr.is_directory {
                             FileType::Directory
                         } else {
                             FileType::RegularFile
                         };
                         count += 1;
-                        if reply.add(entry.ino, next_offset as i64, kind, &entry.name) {
+                        // Inode id here is useless and further `lookup` will still be called.
+                        // But it still need to be not zero.
+                        if reply.add(u64::MAX, next_offset as i64, kind, &entry.name) {
                             break;
                         }
                     }

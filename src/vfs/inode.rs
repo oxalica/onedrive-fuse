@@ -1,6 +1,7 @@
 use crate::{
     error::{Error, Result},
     util::de_duration_sec,
+    vfs::dir,
 };
 use lru_cache::LruCache;
 use onedrive_api::{
@@ -199,15 +200,62 @@ impl InodePool {
         *node.attr.lock().await = (attr, fetch_time);
     }
 
+    /// Update InodeAttr of existing inode or allocate a new inode,
+    /// also increase the reference count.
+    async fn acquire_or_alloc_with_attr(
+        &self,
+        item_id: &ItemId,
+        attr: InodeAttr,
+        fetch_time: Instant,
+    ) -> u64 {
+        let (ino, node) = {
+            let mut alive = self.alive.lock().unwrap();
+            match alive.acquire_ino(item_id) {
+                Some(ino) => (ino, alive.get(ino).unwrap()),
+                None => {
+                    // Not found in cache, allocate a new inode.
+                    let node = Arc::new(Inode {
+                        item_id: item_id.clone(),
+                        attr: Mutex::new((attr, fetch_time)),
+                    });
+                    let ino = alive.alloc(node);
+                    return ino;
+                }
+            }
+        };
+
+        // We cannot use `await` when holding mutex guard above.
+        let mut cache = node.attr.lock().await;
+        // Only update if later.
+        if cache.1 < fetch_time {
+            *cache = (attr, fetch_time);
+        }
+        ino
+    }
+
     pub async fn lookup(
         &self,
         parent_ino: u64,
         child_name: &OsStr,
+        dir_pool: &dir::DirPool,
         onedrive: &OneDrive,
     ) -> Result<(u64, InodeAttr, Duration)> {
-        // TODO: Check from directory cache first.
         let parent_item_id = self.get_item_id(parent_ino)?;
         let child_name = cvt_filename(child_name)?;
+
+        match dir_pool.lookup(parent_ino, child_name.as_str()).await {
+            // Cache hit but item not found.
+            Some(None) => return Err(Error::NotFound),
+            // Cache hit and item found.
+            Some(Some((ent, ttl))) => {
+                let ino = self
+                    .acquire_or_alloc_with_attr(&ent.item_id, ent.attr, Instant::now() - ttl)
+                    .await;
+                return Ok((ino, ent.attr, ttl));
+            }
+            // Cache miss.
+            None => {}
+        }
 
         // Fetch.
         let (item_id, attr) = InodeAttr::fetch(
@@ -217,26 +265,10 @@ impl InodePool {
         .await?;
         let fetch_time = Instant::now();
 
-        // Refresh cache or alloc a new inode.
+        let ino = self
+            .acquire_or_alloc_with_attr(&item_id, attr, fetch_time)
+            .await;
         let ttl = self.config.attr_cache_ttl;
-        let (ino, node_to_refresh) = {
-            let mut alive = self.alive.lock().unwrap();
-            match alive.acquire_ino(&item_id) {
-                Some(ino) => (ino, alive.get(ino).unwrap()),
-                None => {
-                    // Not found in cache, allocate a new inode.
-                    let node = Arc::new(Inode {
-                        item_id,
-                        attr: Mutex::new((attr, fetch_time)),
-                    });
-                    let ino = alive.alloc(node);
-                    return Ok((ino, attr, ttl));
-                }
-            }
-        };
-
-        // We cannot use `await` when holding mutex guard above.
-        *node_to_refresh.attr.lock().await = (attr, fetch_time);
         Ok((ino, attr, ttl))
     }
 

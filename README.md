@@ -63,8 +63,8 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
 - [ ] Cache
   - [x] Statfs cache
   - [x] Inode attributes (stat) cache
-  - [ ] Directory tree cache
-    - [ ] lookup cache
+  - [x] Directory tree cache
+    - [x] lookup cache
     - [x] readdir cache
   - [ ] Read cache
   - [ ] Write cache
