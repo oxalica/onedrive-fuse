@@ -17,6 +17,7 @@ config = { version = "0.10.1", default-features = false, features = ["toml"] }
 env_logger = "0.8.1"
 fuse = "0.3.1"
 http = "0.2.1"
+humantime = "2.0.1"
 libc = "0.2.69"
 log = "0.4.8"
 lru-cache = "0.1.2"

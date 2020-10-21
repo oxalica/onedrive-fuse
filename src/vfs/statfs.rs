@@ -12,7 +12,7 @@ pub struct Statfs {
     cache: Mutex<Option<(StatfsData, Instant)>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(deserialize_with = "de_duration_sec")]
     cache_ttl: Duration,

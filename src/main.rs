@@ -1,16 +1,17 @@
+use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
 use nix::unistd::{getgid, getuid};
-use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
-use serde::{Deserialize, Serialize};
+use onedrive_api::{Auth, Permission};
+use serde::Deserialize;
 use std::{
     env, fs, io,
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
 };
 use structopt::StructOpt;
 
 mod error;
 mod fuse_fs;
+mod login;
 mod util;
 mod vfs;
 
@@ -54,18 +55,13 @@ async fn main_login(opt: OptLogin) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    {
-        let mut f =
-            fs::File::create(&credential_path).context("Cannot create or open credential file")?;
-        f.set_permissions(fs::Permissions::from_mode(0o644))
-            .context("Cannot set permission of credential file")?;
-        let credential = Credential {
-            client_id: opt.client_id,
-            redirect_uri: REDIRECT_URI.to_owned(),
-            refresh_token,
-        };
-        serde_json::to_writer(&mut f, &credential)?;
+    login::Credential {
+        client_id: opt.client_id,
+        redirect_uri: REDIRECT_URI.to_owned(),
+        refresh_token,
     }
+    .save(&credential_path)
+    .context("Cannot save credential file")?;
 
     Ok(())
 }
@@ -104,52 +100,29 @@ async fn main_mount(opt: OptMount) -> Result<()> {
         .credential
         .or_else(default_credential_path)
         .context("No credential file provided")?;
-    let mut credential: Credential = {
-        let f = fs::File::open(&credential_path).context("Cannot open credential file")?;
-        serde_json::from_reader(f).context("Invalid credential file")?
-    };
 
-    let config = load_vfs_config(opt.config.as_deref())?;
+    let config = load_config(opt.config.as_deref())?;
 
-    log::info!("Logining...");
-    let auth = Auth::new(
-        credential.client_id.clone(),
-        Permission::new_read().offline_access(true),
-        credential.redirect_uri.clone(),
-    );
-    let token_resp = auth
-        .login_with_refresh_token(&credential.refresh_token, None)
-        .await?;
-    credential.refresh_token = token_resp.refresh_token.unwrap();
-
-    log::info!("Updating credential...");
-    if let Err(err) = (|| -> Result<_> {
-        let mut f =
-            fs::File::create(&credential_path).context("Cannot create or open credential file")?;
-        f.set_permissions(fs::Permissions::from_mode(0o644))
-            .context("Cannot set permission of credential file")?;
-        serde_json::to_writer(&mut f, &credential)?;
-        Ok(())
-    })() {
-        log::warn!(
-            "Cannot update credential file. It may be expired without refreshing. {}",
-            err
-        );
-    }
-
-    let onedrive = OneDrive::new(token_resp.access_token, DriveLocation::me());
+    let onedrive = ManagedOnedrive::login(credential_path, config.relogin).await?;
+    let vfs = vfs::Vfs::new(config.vfs, onedrive.clone())
+        .await
+        .context("Failed to initialize vfs")?;
 
     log::info!("Mounting...");
     let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
-    let fs = fuse_fs::Filesystem::new(onedrive, uid, gid, config)
-        .await
-        .context("Cannot initialize vfs")?;
+    let fs = fuse_fs::Filesystem::new(vfs, uid, gid);
     let mount_point = opt.mount_point;
     tokio::task::spawn_blocking(move || fuse::mount(fs, &mount_point, &[])).await??;
     Ok(())
 }
 
-fn load_vfs_config(config: Option<&Path>) -> Result<vfs::Config> {
+#[derive(Debug, Deserialize)]
+struct Config {
+    vfs: vfs::Config,
+    relogin: login::ReloginConfig,
+}
+
+fn load_config(config: Option<&Path>) -> Result<Config> {
     use config::{Config, File, FileFormat};
     const DEFAULT_CONFIG: &str = include_str!("../config.default.toml");
 
@@ -160,13 +133,6 @@ fn load_vfs_config(config: Option<&Path>) -> Result<vfs::Config> {
         conf.merge(File::new(path, FileFormat::Toml))?;
     }
     Ok(conf.try_into()?)
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Credential {
-    client_id: String,
-    redirect_uri: String,
-    refresh_token: String,
 }
 
 #[derive(Debug, StructOpt)]

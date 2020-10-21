@@ -19,7 +19,7 @@ use std::{
 use time::Timespec;
 use tokio::sync::Mutex;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(deserialize_with = "de_duration_sec")]
     attr_cache_ttl: Duration,

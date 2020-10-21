@@ -1,16 +1,37 @@
-[statfs]
-cache_ttl = 30
+[relogin]
+# Whether to enable auto-relogin.
+# Normally the token returned is available for 3600 s (1 hour). We need to periodly re-login
+# to get a new token if need to serve for a long time.
+# The refresh token returned will be periodly saved to credential file, so keep that file writable.
+enable = true
+# Check period in seconds.
+# We will periodly check current time for whether need re-login, instead of sleep to the target time,
+# since system time may change and the system may suspend and resume.
+# This is also the retry delay if a re-login attempt failed.
+check_period = 60
+# Time in seconds before the token expiration to start re-login.
+# If current time is after the expiration time (returned in login response) minus `time_before_expire`,
+# it tries to re-login.
+time_before_expire = 600
+# Minimal login cooldown time in seconds.
+# No re-login will be performed in `min_live_time` after a successful login, even though the condition
+# of `time_before_expire` reached.
+min_live_time = 60
 
-[inode]
-# Cache timeout for inode metadata.
+[vfs.statfs]
+# Cache timeout in seconds for statfs information.
+cache_ttl = 300
+
+[vfs.inode]
+# Cache timeout in seconds for inode metadata.
 attr_cache_ttl = 30
 # Size of LRU cache of inode metadata which are not referenced.
 dead_lru_cache_size = 4096
 
-[dir]
-# Size of LRU cache of contents of directories.
+[vfs.dir]
+# Size of LRU cache for contents of directories.
 lru_cache_size = 4096
-# Cache timeout for content of directories.
+# Cache timeout in seconds for content of directories.
 # If content is expired but still in LRU cache, it will check whether the content is changed
 # using cTag and may refresh the cache.
 cache_ttl = 30

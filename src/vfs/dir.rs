@@ -24,7 +24,7 @@ pub struct DirEntry {
     pub attr: inode::InodeAttr,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
     lru_cache_size: usize,
     #[serde(deserialize_with = "de_duration_sec")]

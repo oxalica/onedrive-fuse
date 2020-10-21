@@ -1,9 +1,5 @@
-use crate::{
-    error::{IntoCError as _, Result},
-    vfs,
-};
+use crate::{error::IntoCError as _, vfs};
 use fuse::*;
-use onedrive_api::OneDrive;
 use std::{convert::TryFrom as _, ffi::OsStr, sync::Arc};
 use time::Timespec;
 
@@ -17,22 +13,16 @@ pub struct Filesystem {
 }
 
 struct FilesystemInner {
-    onedrive: OneDrive,
+    vfs: vfs::Vfs,
     uid: u32,
     gid: u32,
-    vfs: vfs::Vfs,
 }
 
 impl Filesystem {
-    pub async fn new(onedrive: OneDrive, uid: u32, gid: u32, config: vfs::Config) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(FilesystemInner {
-                uid,
-                gid,
-                vfs: vfs::Vfs::new(config, &onedrive).await?,
-                onedrive,
-            }),
-        })
+    pub fn new(vfs: vfs::Vfs, uid: u32, gid: u32) -> Self {
+        Self {
+            inner: Arc::new(FilesystemInner { vfs, uid, gid }),
+        }
     }
 
     fn spawn<F, Fut>(&self, f: F)
@@ -83,7 +73,7 @@ impl fuse::Filesystem for Filesystem {
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
         log::debug!("statfs");
         self.spawn(|inner| async move {
-            match inner.vfs.statfs(&inner.onedrive).await {
+            match inner.vfs.statfs().await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok((vfs::StatfsData { total, free }, _ttl)) => reply.statfs(
                     to_blocks_ceil(total),
@@ -103,7 +93,7 @@ impl fuse::Filesystem for Filesystem {
         log::debug!("lookup #{}/{}", parent, name.to_string_lossy());
         let name = name.to_owned();
         self.spawn(|inner| async move {
-            match inner.vfs.lookup(parent, &name, &inner.onedrive).await {
+            match inner.vfs.lookup(parent, &name).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok((ino, attr, ttl)) => {
                     let ttl = dur_to_timespec(ttl);
@@ -124,7 +114,7 @@ impl fuse::Filesystem for Filesystem {
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         log::debug!("getattr #{}", ino);
         self.spawn(|inner| async move {
-            match inner.vfs.get_attr(ino, &inner.onedrive).await {
+            match inner.vfs.get_attr(ino).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok((attr, ttl)) => {
                     let ttl = dur_to_timespec(ttl);
@@ -142,7 +132,7 @@ impl fuse::Filesystem for Filesystem {
     fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         // FIXME: Check flags?
         self.spawn(|inner| async move {
-            match inner.vfs.open_dir(ino, &inner.onedrive).await {
+            match inner.vfs.open_dir(ino).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok(fh) => {
                     log::debug!("opendir #{} flags=0x{:X}(0o{1:o}) -> {}", ino, flags, fh);

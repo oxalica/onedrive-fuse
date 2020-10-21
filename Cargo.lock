@@ -709,6 +709,7 @@ dependencies = [
  "env_logger",
  "fuse",
  "http",
+ "humantime",
  "libc",
  "log 0.4.11",
  "lru-cache",
