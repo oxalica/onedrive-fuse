@@ -155,7 +155,7 @@ impl Credential {
         use std::os::unix::fs::PermissionsExt as _;
 
         let f = fs::File::create(path.as_ref())?;
-        f.set_permissions(fs::Permissions::from_mode(0o644))
+        f.set_permissions(fs::Permissions::from_mode(0o600)) // rw-------
             .context("Cannot set permission")?;
         serde_json::to_writer(f, self)?;
         Ok(())
