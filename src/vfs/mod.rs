@@ -73,7 +73,7 @@ impl Vfs {
         let item_id = self.inode_pool.get_item_id(ino)?;
         let fh = self
             .dir_pool
-            .open(ino, item_id, &self.inode_pool, &*self.onedrive().await)
+            .open(&item_id, &self.inode_pool, &*self.onedrive().await)
             .await?;
         Ok(fh)
     }

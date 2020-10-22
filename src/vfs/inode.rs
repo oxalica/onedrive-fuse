@@ -249,7 +249,7 @@ impl InodePool {
         let parent_item_id = self.get_item_id(parent_ino)?;
         let child_name = cvt_filename(child_name)?;
 
-        match dir_pool.lookup(parent_ino, child_name.as_str()).await {
+        match dir_pool.lookup(&parent_item_id, child_name.as_str()).await {
             // Cache hit but item not found.
             Some(None) => return Err(Error::NotFound),
             // Cache hit and item found.

@@ -35,10 +35,8 @@ pub struct Config {
 
 pub struct DirPool {
     opened_handles: Slab<Arc<DirSnapshot>>,
-    /// Inode -> DirSnapshot
-    ///
-    /// `Instant` for last checked time.
-    lru_cache: SyncMutex<LruCache<u64, (Arc<DirSnapshot>, Instant)>>,
+    /// ItemId -> (DirSnapshot, fetch_time)
+    lru_cache: SyncMutex<LruCache<ItemId, (Arc<DirSnapshot>, Instant)>>,
     config: Config,
 }
 
@@ -72,13 +70,12 @@ impl DirPool {
 
     pub async fn open(
         &self,
-        ino: u64,
-        item_id: ItemId,
+        item_id: &ItemId,
         inode_pool: &inode::InodePool,
         onedrive: &OneDrive,
     ) -> Result<u64> {
         // Check directory content cache of the given inode.
-        let prev_snapshot = match self.lru_cache.lock().unwrap().get_mut(&ino).cloned() {
+        let prev_snapshot = match self.lru_cache.lock().unwrap().get_mut(item_id).cloned() {
             // Cache hit.
             Some((snapshot, last_checked)) if last_checked.elapsed() < self.config.cache_ttl => {
                 return Ok(Self::key_to_fh(self.alloc(snapshot)))
@@ -120,7 +117,7 @@ impl DirPool {
             opt = opt.if_none_match(&prev.c_tag);
         }
         let ret = onedrive
-            .get_item_with_option(ItemLocation::from_id(&item_id), opt)
+            .get_item_with_option(ItemLocation::from_id(item_id), opt)
             .await?;
         let fetch_time = Instant::now();
 
@@ -133,7 +130,7 @@ impl DirPool {
                 self.lru_cache
                     .lock()
                     .unwrap()
-                    .insert(ino, (prev_snapshot.clone(), fetch_time));
+                    .insert(item_id.clone(), (prev_snapshot.clone(), fetch_time));
                 return Ok(Self::key_to_fh(self.alloc(prev_snapshot)));
             }
         };
@@ -167,7 +164,7 @@ impl DirPool {
         self.lru_cache
             .lock()
             .unwrap()
-            .insert(ino, (snapshot.clone(), fetch_time));
+            .insert(item_id.clone(), (snapshot.clone(), fetch_time));
         Ok(Self::key_to_fh(self.alloc(snapshot)))
     }
 
@@ -197,11 +194,11 @@ impl DirPool {
     /// `Some(Some(_))` for found.
     pub async fn lookup(
         &self,
-        parent_ino: u64,
+        parent_item_id: &ItemId,
         name: &str,
     ) -> Option<Option<(DirEntry, Duration)>> {
         let mut cache = self.lru_cache.lock().unwrap();
-        if let Some((snapshot, last_fetch_time)) = cache.get_mut(&parent_ino) {
+        if let Some((snapshot, last_fetch_time)) = cache.get_mut(parent_item_id) {
             if let Some(ttl) = self.config.cache_ttl.checked_sub(last_fetch_time.elapsed()) {
                 let ret = snapshot
                     .name_map
