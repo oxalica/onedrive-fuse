@@ -18,7 +18,7 @@ pub struct Config {
     cache_ttl: Duration,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct StatfsData {
     pub total: u64,
     pub free: u64,
@@ -41,7 +41,7 @@ impl Statfs {
         }
 
         // Cache miss.
-        log::debug!(target: "cache", "statfs: cache miss");
+        log::debug!("cache miss");
         let data = self.statfs_raw(onedrive).await?;
         // Fresh cache.
         *cache = Some((data, Instant::now()));

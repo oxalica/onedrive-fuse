@@ -71,7 +71,6 @@ impl fuse::Filesystem for Filesystem {
     }
 
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
-        log::debug!("statfs");
         self.spawn(|inner| async move {
             match inner.vfs.statfs().await {
                 Err(err) => reply.error(err.into_c_err()),
@@ -90,7 +89,6 @@ impl fuse::Filesystem for Filesystem {
     }
 
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        log::debug!("lookup #{}/{}", parent, name.to_string_lossy());
         let name = name.to_owned();
         self.spawn(|inner| async move {
             match inner.vfs.lookup(parent, &name).await {
@@ -105,14 +103,12 @@ impl fuse::Filesystem for Filesystem {
     }
 
     fn forget(&mut self, _req: &Request, ino: u64, nlookup: u64) {
-        log::debug!("forget #{} nlookup={}", ino, nlookup);
         self.spawn(|inner| async move {
             inner.vfs.forget(ino, nlookup).await.unwrap();
         });
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        log::debug!("getattr #{}", ino);
         self.spawn(|inner| async move {
             match inner.vfs.get_attr(ino).await {
                 Err(err) => reply.error(err.into_c_err()),
@@ -129,21 +125,17 @@ impl fuse::Filesystem for Filesystem {
         reply.ok();
     }
 
-    fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+    fn opendir(&mut self, _req: &Request, ino: u64, _flags: u32, reply: ReplyOpen) {
         // FIXME: Check flags?
         self.spawn(|inner| async move {
             match inner.vfs.open_dir(ino).await {
                 Err(err) => reply.error(err.into_c_err()),
-                Ok(fh) => {
-                    log::debug!("opendir #{} flags=0x{:X}(0o{1:o}) -> {}", ino, flags, fh);
-                    reply.opened(fh, 0)
-                }
+                Ok(fh) => reply.opened(fh, 0),
             }
         });
     }
 
     fn releasedir(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, reply: ReplyEmpty) {
-        log::debug!("releasedir #{} fh={}", ino, fh);
         self.spawn(|inner| async move {
             inner.vfs.close_dir(ino, fh).await.unwrap();
             reply.ok();
@@ -163,7 +155,6 @@ impl fuse::Filesystem for Filesystem {
             match inner.vfs.read_dir(ino, fh, offset).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok(entries) => {
-                    let mut count = 0usize;
                     for (idx, entry) in entries.as_ref().iter().enumerate() {
                         let next_offset = offset
                             .checked_add(u64::try_from(idx).unwrap())
@@ -175,20 +166,12 @@ impl fuse::Filesystem for Filesystem {
                         } else {
                             FileType::RegularFile
                         };
-                        count += 1;
                         // Inode id here is useless and further `lookup` will still be called.
                         // But it still need to be not zero.
                         if reply.add(u64::MAX, next_offset as i64, kind, &entry.name) {
                             break;
                         }
                     }
-                    log::debug!(
-                        "readdir #{} fh={} offset={} -> {} entries",
-                        ino,
-                        fh,
-                        offset,
-                        count,
-                    );
                     reply.ok();
                 }
             }
@@ -200,7 +183,6 @@ impl fuse::Filesystem for Filesystem {
         static_assertions::const_assert_eq!(libc::O_RDONLY, 0);
 
         if (flags & libc::O_WRONLY as u32) != 0 {
-            log::warn!("open: write is not supported yet");
             reply.error(libc::EPERM);
             return;
         }
@@ -208,7 +190,6 @@ impl fuse::Filesystem for Filesystem {
         self.spawn(|inner| async move {
             match inner.vfs.open_file(ino).await {
                 Ok(fh) => {
-                    log::debug!("open #{} flags=0x{:X}(0o{1:o}) -> {}", ino, flags, fh);
                     reply.opened(fh, libc::O_RDONLY as u32);
                 }
                 Err(err) => reply.error(err.into_c_err()),
@@ -226,7 +207,6 @@ impl fuse::Filesystem for Filesystem {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        log::debug!("release #{} fh={}", ino, fh);
         self.spawn(|inner| async move {
             match inner.vfs.close_file(ino, fh).await {
                 Ok(()) => reply.ok(),
@@ -250,14 +230,6 @@ impl fuse::Filesystem for Filesystem {
             match inner.vfs.read_file(ino, fh, offset, size).await {
                 Ok(data) => {
                     let data = data.as_ref();
-                    log::debug!(
-                        "read #{} fh={} offset={} size={} -> returned {}",
-                        ino,
-                        fh,
-                        offset,
-                        size,
-                        data.len(),
-                    );
                     reply.data(data);
                 }
                 Err(err) => reply.error(err.into_c_err()),

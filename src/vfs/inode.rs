@@ -29,7 +29,7 @@ pub struct Config {
 }
 
 // This should not hold any heap-allocation due to the requirement `Inode: Clear`.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct InodeAttr {
     pub size: u64,
     pub mtime: Timespec,
@@ -278,14 +278,18 @@ impl InodePool {
         Ok((ino, attr, ttl))
     }
 
-    pub async fn free(&self, ino: u64, count: u64) -> Result<()> {
+    /// Decrease reference count of an inode by `count`.
+    /// Return if it is freed.
+    pub async fn free(&self, ino: u64, count: u64) -> Result<bool> {
         let mut alive = self.alive.lock().unwrap();
         if let Some(node) = alive.free(ino, count)? {
             // When freed, put it into cache to allow reusing metadata.
             // Hold both mutex guards to avoid race.
             self.dead.lock().unwrap().insert(node.item_id.clone(), node);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 
     pub async fn get_attr(&self, ino: u64, onedrive: &OneDrive) -> Result<(InodeAttr, Duration)> {
@@ -298,7 +302,7 @@ impl InodePool {
         }
 
         // Cache outdated. Hold the mutex during the request.
-        log::debug!("get_attr: cache miss");
+        log::debug!("cache miss");
         let (_, new_attr) =
             InodeAttr::fetch(ItemLocation::from_id(&node.item_id), onedrive).await?;
         // Refresh cache.

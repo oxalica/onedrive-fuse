@@ -82,12 +82,12 @@ impl DirPool {
             }
             // Cache outdated. Need re-check.
             Some((snapshot, _)) => {
-                log::debug!("open_dir: cache outdated");
+                log::debug!("cache outdated");
                 Some(snapshot)
             }
             // No cache found.
             None => {
-                log::debug!("open_dir: cache miss");
+                log::debug!("cache miss");
                 None
             }
         };
@@ -125,7 +125,7 @@ impl DirPool {
             Some(item) => item,
             None => {
                 // Content not changed. Reuse the cache.
-                log::debug!("open_dir: cache not modified, refresh");
+                log::debug!("cache not modified, refresh");
                 let prev_snapshot = prev_snapshot.unwrap();
                 self.lru_cache
                     .lock()
