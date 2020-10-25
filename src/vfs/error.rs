@@ -64,7 +64,7 @@ impl Error {
 
             // Not supported
             Self::NonsequentialRead { .. } => {
-                log::warn!("{}", self);
+                log::info!("{}", self);
                 libc::EPERM
             }
 

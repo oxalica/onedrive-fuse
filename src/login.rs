@@ -104,7 +104,7 @@ impl ManagedOnedrive {
                 .await
             {
                 Err(err) => {
-                    log::warn!("Relogin failed (will retry in next period): {:?}", err);
+                    log::error!("Relogin failed (will retry in next period): {:?}", err);
                     continue;
                 }
                 Ok(resp) => resp,
@@ -125,7 +125,7 @@ impl ManagedOnedrive {
             cred.refresh_token = resp.refresh_token.unwrap();
             match cred.save(&credential_file) {
                 Ok(()) => log::info!("New credential saved"),
-                Err(err) => log::warn!(
+                Err(err) => log::error!(
                     "Cannot save credential file. Your refresh token may expire! {}",
                     err,
                 ),
@@ -146,18 +146,31 @@ pub struct Credential {
 }
 
 impl Credential {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let f = fs::File::open(path.as_ref())?;
+    pub fn load(path: &Path) -> Result<Self> {
+        let f = fs::File::open(path)?;
         Ok(serde_json::from_reader(f)?)
     }
 
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn save(&self, path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let f = fs::File::create(path.as_ref())?;
-        f.set_permissions(fs::Permissions::from_mode(0o600)) // rw-------
-            .context("Cannot set permission")?;
-        serde_json::to_writer(f, self)?;
+        let parent = path.parent().context("Invalid credential path")?;
+        fs::create_dir_all(parent)?;
+
+        let tmp_path = if path.extension().map_or(false, |ext| ext == "tmp") {
+            path.with_extension("_tmp")
+        } else {
+            path.with_extension("tmp")
+        };
+
+        {
+            let f = fs::File::create(&tmp_path)?;
+            f.set_permissions(fs::Permissions::from_mode(0o600)) // rw-------
+                .context("Cannot set permission of credential file")?;
+            serde_json::to_writer(f, self)?;
+        }
+
+        fs::rename(&tmp_path, path)?;
         Ok(())
     }
 }

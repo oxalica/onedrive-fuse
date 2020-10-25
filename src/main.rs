@@ -45,10 +45,6 @@ async fn main_login(opt: OptLogin) -> Result<()> {
 
     eprintln!("Login successfully, saving credential...");
 
-    if let Some(parent) = credential_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     login::Credential {
         client_id: opt.client_id,
         redirect_uri: REDIRECT_URI.to_owned(),
