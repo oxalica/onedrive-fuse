@@ -124,6 +124,14 @@ enum Opt {
 }
 
 #[derive(Debug, StructOpt)]
+#[structopt(after_help = "\
+EXAMPLES:
+    # Login with some client id.
+    onedrive-fuse --client-id 00000000-0000-0000-0000-000000000000
+
+    # And save credential to a custom path.
+    onedrive-fuse -c /path/to/credential --client-id 00000000-0000-0000-0000-000000000000
+")]
 struct OptLogin {
     /// Secret credential file to save your logined OneDrive account.
     /// Default to be `$HOME/.onedrive/credential.json`.
@@ -141,6 +149,17 @@ struct OptLogin {
 }
 
 #[derive(Debug, StructOpt)]
+#[structopt(after_help = "\
+EXAMPLES:
+    # Using default credential file to mount OneDrive on `~/mnt`.
+    onedrive-fuse mount ~/mnt
+
+    # Use custom credential file.
+    onedrive-fuse mount -c /path/to/credential ~/mnt
+
+    # Modify some default settings.
+    onedrive-fuse mount -o permission.umask=0o077 -o relogin.enable=false ~/mnt
+")]
 struct OptMount {
     /// Secret credential file to login OneDrive account.
     /// Default to be `$HOME/.onedrive_fuse/credential.json`.
