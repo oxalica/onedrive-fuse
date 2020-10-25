@@ -168,7 +168,7 @@ impl DirPool {
         Ok(Self::key_to_fh(self.alloc(snapshot)))
     }
 
-    pub fn free(&self, fh: u64) -> Result<()> {
+    pub fn close(&self, fh: u64) -> Result<()> {
         if self.opened_handles.remove(Self::fh_to_key(fh)) {
             Ok(())
         } else {

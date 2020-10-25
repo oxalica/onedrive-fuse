@@ -1,10 +1,12 @@
 use crate::login::ManagedOnedrive;
 use onedrive_api::OneDrive;
+use reqwest::Client;
 use serde::Deserialize;
 use std::{ffi::OsStr, ops::Deref, time::Duration};
 
 mod dir;
 pub mod error;
+mod file;
 mod inode;
 mod statfs;
 
@@ -18,13 +20,16 @@ pub struct Config {
     statfs: statfs::Config,
     inode: inode::Config,
     dir: dir::Config,
+    file: file::Config,
 }
 
 pub struct Vfs {
     statfs: statfs::Statfs,
     inode_pool: inode::InodePool,
     dir_pool: dir::DirPool,
+    file_pool: file::FilePool,
     onedrive: ManagedOnedrive,
+    client: Client,
 }
 
 impl Vfs {
@@ -34,7 +39,9 @@ impl Vfs {
             statfs: statfs::Statfs::new(config.statfs),
             inode_pool,
             dir_pool: dir::DirPool::new(config.dir),
+            file_pool: file::FilePool::new(config.file),
             onedrive,
+            client: Client::new(),
         })
     }
 
@@ -79,7 +86,7 @@ impl Vfs {
     }
 
     pub async fn close_dir(&self, _ino: u64, fh: u64) -> Result<()> {
-        self.dir_pool.free(fh)
+        self.dir_pool.close(fh)
     }
 
     pub async fn read_dir(
@@ -89,5 +96,29 @@ impl Vfs {
         offset: u64,
     ) -> Result<impl AsRef<[DirEntry]>> {
         self.dir_pool.read(fh, offset).await
+    }
+
+    // TODO: Flags.
+    pub async fn open_file(&self, ino: u64) -> Result<u64> {
+        let item_id = self.inode_pool.get_item_id(ino)?;
+        let fh = self
+            .file_pool
+            .open(&item_id, &*self.onedrive().await)
+            .await?;
+        Ok(fh)
+    }
+
+    pub async fn close_file(&self, _ino: u64, fh: u64) -> Result<()> {
+        self.file_pool.close(fh).await
+    }
+
+    pub async fn read_file(
+        &self,
+        _ino: u64,
+        fh: u64,
+        offset: u64,
+        size: usize,
+    ) -> Result<impl AsRef<[u8]>> {
+        self.file_pool.read(fh, offset, size, &self.client).await
     }
 }

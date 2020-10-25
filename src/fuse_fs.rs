@@ -194,6 +194,76 @@ impl fuse::Filesystem for Filesystem {
             }
         });
     }
+
+    fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+        // Read is always allowed.
+        static_assertions::const_assert_eq!(libc::O_RDONLY, 0);
+
+        if (flags & libc::O_WRONLY as u32) != 0 {
+            log::warn!("open: write is not supported yet");
+            reply.error(libc::EPERM);
+            return;
+        }
+
+        self.spawn(|inner| async move {
+            match inner.vfs.open_file(ino).await {
+                Ok(fh) => {
+                    log::debug!("open #{} flags=0x{:X}(0o{1:o}) -> {}", ino, flags, fh);
+                    reply.opened(fh, libc::O_RDONLY as u32);
+                }
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        });
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        _flags: u32,
+        _lock_owner: u64,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        log::debug!("release #{} fh={}", ino, fh);
+        self.spawn(|inner| async move {
+            match inner.vfs.close_file(ino, fh).await {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        });
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        reply: ReplyData,
+    ) {
+        let offset = u64::try_from(offset).unwrap();
+        let size = usize::try_from(size).unwrap();
+        self.spawn(|inner| async move {
+            match inner.vfs.read_file(ino, fh, offset, size).await {
+                Ok(data) => {
+                    let data = data.as_ref();
+                    log::debug!(
+                        "read #{} fh={} offset={} size={} -> returned {}",
+                        ino,
+                        fh,
+                        offset,
+                        size,
+                        data.len(),
+                    );
+                    reply.data(data);
+                }
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        });
+    }
 }
 
 fn to_blocks_ceil(bytes: u64) -> u64 {

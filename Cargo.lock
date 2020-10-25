@@ -705,6 +705,7 @@ name = "onedrive-fuse"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "config",
  "env_logger",
  "fuse",

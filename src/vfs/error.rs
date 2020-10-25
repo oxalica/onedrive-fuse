@@ -11,11 +11,19 @@ pub enum Error {
     #[error("Invalid file name: {}", .0.to_string_lossy())]
     InvalidFileName(OsString),
 
-    // Api errors.
+    // Api and network errors.
     #[error("Api error: {0}")]
     ApiError(onedrive_api::Error),
     #[error("Api error (deserialization): {0}")]
     ApiDeserializeError(#[from] serde_json::Error),
+    #[error("reqwest error: {0}")]
+    ReqwestError(#[from] reqwest::Error),
+    #[error("Unexpected end of download stream at {current_pos}")]
+    UnexpectedEndOfDownload { current_pos: u64 },
+
+    // Not supported
+    #[error("Nonsequential read is not supported: current at {current_pos} but try to read {try_offset}")]
+    NonsequentialRead { current_pos: u64, try_offset: u64 },
 
     // Fuse errors.
     // They are hard errors here, since `fuse` should guarantee that they are valid.
@@ -38,17 +46,29 @@ impl From<onedrive_api::Error> for Error {
 impl Error {
     pub fn into_c_err(self) -> libc::c_int {
         match &self {
+            // User errors.
             Self::NotFound => libc::ENOENT,
             Self::InvalidFileName(_) => {
                 log::info!("{}", self);
                 libc::EINVAL
             }
 
-            Self::ApiError(_) | Self::ApiDeserializeError(_) => {
+            // Network errors.
+            Self::ApiError(_)
+            | Self::ApiDeserializeError(_)
+            | Self::ReqwestError(_)
+            | Self::UnexpectedEndOfDownload { .. } => {
                 log::error!("{}", self);
                 libc::EIO
             }
 
+            // Not supported
+            Self::NonsequentialRead { .. } => {
+                log::warn!("{}", self);
+                libc::EPERM
+            }
+
+            // Fuse errors.
             Self::InvalidInode(_) | Self::InvalidHandle(_) => {
                 panic!("Invalid arguments from `fuse`: {}", self);
             }
