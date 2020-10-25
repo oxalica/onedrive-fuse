@@ -1,4 +1,4 @@
-use crate::util::de_duration_sec;
+use crate::config::de_duration_sec;
 use anyhow::{Context as _, Result};
 use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
 use serde::{Deserialize, Serialize};

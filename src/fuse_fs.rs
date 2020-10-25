@@ -1,4 +1,4 @@
-use crate::vfs;
+use crate::{config::PermissionConfig, vfs};
 use fuse::*;
 use std::{convert::TryFrom as _, ffi::OsStr, sync::Arc};
 use time::Timespec;
@@ -14,14 +14,13 @@ pub struct Filesystem {
 
 struct FilesystemInner {
     vfs: vfs::Vfs,
-    uid: u32,
-    gid: u32,
+    perm_config: PermissionConfig,
 }
 
 impl Filesystem {
-    pub fn new(vfs: vfs::Vfs, uid: u32, gid: u32) -> Self {
+    pub fn new(vfs: vfs::Vfs, perm_config: PermissionConfig) -> Self {
         Self {
-            inner: Arc::new(FilesystemInner { vfs, uid, gid }),
+            inner: Arc::new(FilesystemInner { vfs, perm_config }),
         }
     }
 
@@ -50,10 +49,14 @@ impl FilesystemInner {
             } else {
                 FileType::RegularFile
             },
-            perm: 0o777,
+            perm: if attr.is_directory {
+                self.perm_config.dir_permission()
+            } else {
+                self.perm_config.file_permission()
+            } as _,
             nlink: 1,
-            uid: self.uid,
-            gid: self.gid,
+            uid: self.perm_config.uid as _,
+            gid: self.perm_config.gid as _,
             rdev: 0,
             flags: 0,
         }

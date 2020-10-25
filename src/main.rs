@@ -1,17 +1,12 @@
 use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
-use nix::unistd::{getgid, getuid};
 use onedrive_api::{Auth, Permission};
-use serde::Deserialize;
-use std::{
-    env, fs, io,
-    path::{Path, PathBuf},
-};
+use std::{env, fs, io, path::PathBuf};
 use structopt::StructOpt;
 
+mod config;
 mod fuse_fs;
 mod login;
-mod util;
 mod vfs;
 
 #[tokio::main]
@@ -100,7 +95,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
         .or_else(default_credential_path)
         .context("No credential file provided")?;
 
-    let config = load_config(opt.config.as_deref())?;
+    let config = config::Config::merge_from_default(opt.config.as_deref(), &opt.option)?;
 
     let onedrive = ManagedOnedrive::login(credential_path, config.relogin).await?;
     let vfs = vfs::Vfs::new(config.vfs, onedrive.clone())
@@ -108,30 +103,10 @@ async fn main_mount(opt: OptMount) -> Result<()> {
         .context("Failed to initialize vfs")?;
 
     log::info!("Mounting...");
-    let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
-    let fs = fuse_fs::Filesystem::new(vfs, uid, gid);
+    let fs = fuse_fs::Filesystem::new(vfs, config.permission);
     let mount_point = opt.mount_point;
     tokio::task::spawn_blocking(move || fuse::mount(fs, &mount_point, &[])).await??;
     Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct Config {
-    vfs: vfs::Config,
-    relogin: login::ReloginConfig,
-}
-
-fn load_config(config: Option<&Path>) -> Result<Config> {
-    use config::{Config, File, FileFormat};
-    const DEFAULT_CONFIG: &str = include_str!("../config.default.toml");
-
-    let mut conf = Config::new();
-    conf.merge(File::from_str(DEFAULT_CONFIG, FileFormat::Toml))?;
-    if let Some(path) = config {
-        let path = path.to_str().context("Invalid config file path")?;
-        conf.merge(File::new(path, FileFormat::Toml))?;
-    }
-    Ok(conf.try_into()?)
 }
 
 #[derive(Debug, StructOpt)]
@@ -172,13 +147,19 @@ struct OptMount {
     #[structopt(short, long, parse(from_os_str))]
     credential: Option<PathBuf>,
 
-    /// Optional config file to adjust internal settings.
+    /// Config file to override default settings.
+    /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
     #[structopt(long, parse(from_os_str))]
     config: Option<PathBuf>,
 
     /// Mount point.
     #[structopt(parse(from_os_str))]
     mount_point: PathBuf,
+
+    /// Options to override default settings.
+    /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
+    #[structopt(short, long)]
+    option: Vec<String>,
 }
 
 fn default_credential_path() -> Option<PathBuf> {
