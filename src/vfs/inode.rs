@@ -28,7 +28,6 @@ pub struct Config {
     dead_lru_cache_size: usize,
 }
 
-// This should not hold any heap-allocation due to the requirement `Inode: Clear`.
 #[derive(Debug, Clone, Copy)]
 pub struct InodeAttr {
     pub size: u64,

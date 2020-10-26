@@ -1,7 +1,7 @@
 use crate::vfs::{Error, Result};
 use bytes::Bytes;
 use onedrive_api::{ItemId, ItemLocation, OneDrive};
-use reqwest::{header, Client};
+use reqwest::{header, StatusCode};
 use serde::Deserialize;
 use sharded_slab::Slab;
 use std::{convert::TryFrom as _, sync::Arc};
@@ -35,6 +35,7 @@ impl FilePool {
         let item = onedrive.get_item(ItemLocation::from_id(item_id)).await?;
         let file_size = item.size.unwrap() as u64;
         let download_url = item.download_url.unwrap();
+        log::debug!("download: item_id={:?} url={}", item_id, download_url);
         let file = Arc::new(FileRead {
             download_url,
             file_size,
@@ -57,7 +58,7 @@ impl FilePool {
         fh: u64,
         offset: u64,
         size: usize,
-        client: &Client,
+        client: &reqwest::Client,
     ) -> Result<impl AsRef<[u8]>> {
         let file = self
             .read_handles
@@ -101,7 +102,7 @@ impl FileReadState {
         file: &FileRead,
         offset: u64,
         size: usize,
-        client: &Client,
+        client: &reqwest::Client,
     ) -> Result<Bytes> {
         if offset != self.current_pos {
             return Err(Error::NonsequentialRead {
@@ -111,14 +112,25 @@ impl FileReadState {
         }
 
         if self.response.is_none() {
-            self.response = Some(
-                client
-                    .get(&file.download_url)
-                    .header(header::RANGE, format!("bytes={}-", self.current_pos))
-                    .send()
-                    .await?
-                    .error_for_status()?,
-            );
+            let resp = client
+                .get(&file.download_url)
+                .header(header::RANGE, format!("bytes={}-", self.current_pos))
+                .send()
+                .await?;
+            let check_range_response = || {
+                if resp.status() != StatusCode::PARTIAL_CONTENT {
+                    return None;
+                }
+                let val = resp.headers().get(header::CONTENT_RANGE)?.to_str().ok()?;
+                if !val.starts_with(&format!("bytes {}-", self.current_pos)) {
+                    return None;
+                }
+                Some(())
+            };
+            if check_range_response().is_none() {
+                return Err(Error::InvalidRangeResponse);
+            }
+            self.response = Some(resp);
         }
         let resp = self.response.as_mut().unwrap();
 

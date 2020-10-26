@@ -1,7 +1,7 @@
 use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
 use onedrive_api::{Auth, Permission};
-use std::{env, fs, io, path::PathBuf};
+use std::{env, io, path::PathBuf};
 use structopt::StructOpt;
 
 mod config;
