@@ -37,7 +37,7 @@ pub struct InodeAttr {
 }
 
 impl InodeAttr {
-    const SELECT_FIELDS: &'static [DriveItemField] = &[
+    pub const SELECT_FIELDS: &'static [DriveItemField] = &[
         DriveItemField::id,
         DriveItemField::size,
         DriveItemField::last_modified_date_time,

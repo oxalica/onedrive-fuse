@@ -93,6 +93,11 @@ impl DirPool {
         };
 
         // FIXME: Incremental fetching.
+        let children_fields = inode::InodeAttr::SELECT_FIELDS
+            .iter()
+            .chain(std::iter::once(&DriveItemField::name))
+            .map(|field| field.raw_name())
+            .collect::<Vec<_>>();
         let mut opt = ObjectOption::new()
             .select(&[
                 // `id` is required, or we'll get 400 Bad Request.
@@ -100,19 +105,7 @@ impl DirPool {
                 DriveItemField::c_tag,
                 DriveItemField::children,
             ])
-            .expand(
-                DriveItemField::children,
-                // FIXME: Use `DriveItemField`.
-                Some(&[
-                    "name",
-                    // For InodeAttr.
-                    "id",
-                    "size",
-                    "lastModifiedDateTime",
-                    "createdDateTime",
-                    "folder",
-                ]),
-            );
+            .expand(DriveItemField::children, Some(&children_fields));
         if let Some(prev) = &prev_snapshot {
             opt = opt.if_none_match(&prev.c_tag);
         }
