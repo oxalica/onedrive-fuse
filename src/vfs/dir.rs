@@ -95,7 +95,7 @@ impl DirPool {
         // FIXME: Incremental fetching.
         let children_fields = inode::InodeAttr::SELECT_FIELDS
             .iter()
-            .chain(std::iter::once(&DriveItemField::name))
+            .chain(&[DriveItemField::id, DriveItemField::name])
             .map(|field| field.raw_name())
             .collect::<Vec<_>>();
         let mut opt = ObjectOption::new()
@@ -132,9 +132,11 @@ impl DirPool {
 
         let mut entries = Vec::new();
         for item in dir_item.children.unwrap() {
-            let (child_id, child_attr) =
-                inode::InodeAttr::parse_drive_item(&item).expect("Invalid DriveItem");
-            inode_pool.touch(&child_id, child_attr, fetch_time).await;
+            let child_attr = inode::InodeAttr::parse_item(&item).expect("Invalid DriveItem");
+            let child_id = item.id.unwrap();
+            inode_pool
+                .touch(&child_id, child_attr.clone(), fetch_time)
+                .await;
             entries.push(DirEntry {
                 item_id: child_id,
                 name: item.name.unwrap().into(),

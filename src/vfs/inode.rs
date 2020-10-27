@@ -16,9 +16,8 @@ use std::{
     collections::hash_map::{Entry, HashMap},
     ffi::OsStr,
     sync::{Arc, Mutex as SyncMutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
-use time::Timespec;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Deserialize)]
@@ -28,17 +27,19 @@ pub struct Config {
     dead_lru_cache_size: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct InodeAttr {
+    pub parent_item_id: Option<ItemId>,
     pub size: u64,
-    pub mtime: Timespec,
-    pub crtime: Timespec,
+    pub mtime: SystemTime,
+    pub crtime: SystemTime,
     pub is_directory: bool,
 }
 
 impl InodeAttr {
     pub const SELECT_FIELDS: &'static [DriveItemField] = &[
-        DriveItemField::id,
+        DriveItemField::root, // To verify `parent_reference`.
+        DriveItemField::parent_reference,
         DriveItemField::size,
         DriveItemField::last_modified_date_time,
         DriveItemField::created_date_time,
@@ -46,31 +47,43 @@ impl InodeAttr {
     ];
 
     async fn fetch(loc: ItemLocation<'_>, onedrive: &OneDrive) -> Result<(ItemId, InodeAttr)> {
-        // The reply is quite small and we don't need to check changes with eTag.
         let item = onedrive
-            .get_item_with_option(loc, ObjectOption::new().select(Self::SELECT_FIELDS))
+            .get_item_with_option(
+                loc,
+                ObjectOption::new()
+                    .select(&[DriveItemField::id])
+                    .select(Self::SELECT_FIELDS),
+            )
             .await?
             .expect("No If-None-Match");
-        Self::parse_drive_item(&item)
+        let attr = Self::parse_item(&item)
+            .unwrap_or_else(|| panic!("Cannot parse inode attrs: {:?}", item));
+        Ok((item.id.unwrap(), attr))
     }
 
-    pub fn parse_drive_item(item: &DriveItem) -> Result<(ItemId, InodeAttr)> {
-        fn parse_time(s: &str) -> Timespec {
-            // FIXME
-            time::strptime(s, "%Y-%m-%dT%H:%M:%S.%f%z")
-                .or_else(|_| time::strptime(s, "%Y-%m-%dT%H:%M:%S%z"))
-                .unwrap_or_else(|err| panic!("Invalid time '{}': {}", s, err))
-                .to_timespec()
+    pub fn parse_item(item: &DriveItem) -> Option<InodeAttr> {
+        fn parse_time(s: &str) -> Option<SystemTime> {
+            humantime::parse_rfc3339(s).ok()
         }
 
-        let item_id = item.id.clone().unwrap();
-        let attr = InodeAttr {
-            size: item.size.unwrap() as u64,
-            mtime: parse_time(item.last_modified_date_time.as_deref().unwrap()),
-            crtime: parse_time(item.created_date_time.as_deref().unwrap()),
+        Some(InodeAttr {
+            // https://docs.microsoft.com/en-us/graph/api/resources/itemreference?view=graph-rest-1.0
+            parent_item_id: if item.root.is_some() {
+                None
+            } else {
+                Some(ItemId(
+                    item.parent_reference
+                        .as_ref()?
+                        .get("id")?
+                        .as_str()?
+                        .to_owned(),
+                ))
+            },
+            size: item.size? as u64,
+            mtime: parse_time(item.last_modified_date_time.as_deref()?)?,
+            crtime: parse_time(item.created_date_time.as_deref()?)?,
             is_directory: item.folder.is_some(),
-        };
-        Ok((item_id, attr))
+        })
     }
 }
 
@@ -254,7 +267,11 @@ impl InodePool {
             // Cache hit and item found.
             Some(Some((ent, ttl))) => {
                 let ino = self
-                    .acquire_or_alloc_with_attr(&ent.item_id, ent.attr, Instant::now() - ttl)
+                    .acquire_or_alloc_with_attr(
+                        &ent.item_id,
+                        ent.attr.clone(),
+                        Instant::now() - ttl,
+                    )
                     .await;
                 return Ok((ino, ent.attr, ttl));
             }
@@ -271,7 +288,7 @@ impl InodePool {
         let fetch_time = Instant::now();
 
         let ino = self
-            .acquire_or_alloc_with_attr(&item_id, attr, fetch_time)
+            .acquire_or_alloc_with_attr(&item_id, attr.clone(), fetch_time)
             .await;
         let ttl = self.config.attr_cache_ttl;
         Ok((ino, attr, ttl))
@@ -297,7 +314,7 @@ impl InodePool {
 
         // Check if cache is outdated.
         if let Some(ttl) = self.config.attr_cache_ttl.checked_sub(attr.1.elapsed()) {
-            return Ok((attr.0, ttl));
+            return Ok((attr.0.clone(), ttl));
         }
 
         // Cache outdated. Hold the mutex during the request.
@@ -305,7 +322,7 @@ impl InodePool {
         let (_, new_attr) =
             InodeAttr::fetch(ItemLocation::from_id(&node.item_id), onedrive).await?;
         // Refresh cache.
-        *attr = (new_attr, Instant::now());
+        *attr = (new_attr.clone(), Instant::now());
 
         let ttl = self.config.attr_cache_ttl;
         Ok((new_attr, ttl))

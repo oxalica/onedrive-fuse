@@ -1,7 +1,12 @@
 use crate::{config::PermissionConfig, vfs};
 use fuse::*;
-use std::{convert::TryFrom as _, ffi::OsStr, sync::Arc};
-use time::Timespec;
+use std::{
+    convert::TryFrom as _,
+    ffi::OsStr,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+use time01::Timespec;
 
 const GENERATION: u64 = 0;
 const NAME_LEN: u32 = 2048;
@@ -40,10 +45,10 @@ impl FilesystemInner {
             ino,
             size: attr.size,
             blocks: to_blocks_ceil(attr.size),
-            atime: attr.mtime, // No info.
-            mtime: attr.mtime,
-            ctime: attr.mtime, // No info.
-            crtime: attr.crtime,
+            atime: time_to_timespec(attr.mtime), // No info.
+            mtime: time_to_timespec(attr.mtime),
+            ctime: time_to_timespec(attr.mtime), // No info.
+            crtime: time_to_timespec(attr.crtime),
             kind: if attr.is_directory {
                 FileType::Directory
             } else {
@@ -249,6 +254,10 @@ fn to_blocks_floor(bytes: u64) -> u64 {
     bytes / BLOCK_SIZE as u64
 }
 
-fn dur_to_timespec(dur: std::time::Duration) -> Timespec {
+fn dur_to_timespec(dur: Duration) -> Timespec {
     Timespec::new(dur.as_secs() as i64, dur.subsec_nanos() as i32)
+}
+
+fn time_to_timespec(t: SystemTime) -> Timespec {
+    dur_to_timespec(t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
 }
