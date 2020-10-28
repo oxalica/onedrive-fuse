@@ -11,6 +11,13 @@ mod vfs;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        // Immediately exit the whole program when any (async) thread panicked.
+        std::process::exit(101);
+    }));
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let opt: Opt = Opt::from_args();
