@@ -134,9 +134,7 @@ impl DirPool {
         for item in dir_item.children.unwrap() {
             let child_attr = inode::InodeAttr::parse_item(&item).expect("Invalid DriveItem");
             let child_id = item.id.unwrap();
-            inode_pool
-                .touch(&child_id, child_attr.clone(), fetch_time)
-                .await;
+            inode_pool.touch(&child_id, child_attr.clone());
             entries.push(DirEntry {
                 item_id: child_id,
                 name: item.name.unwrap().into(),

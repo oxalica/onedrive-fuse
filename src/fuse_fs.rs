@@ -18,12 +18,12 @@ pub struct Filesystem {
 }
 
 struct FilesystemInner {
-    vfs: vfs::Vfs,
+    vfs: Arc<vfs::Vfs>,
     perm_config: PermissionConfig,
 }
 
 impl Filesystem {
-    pub fn new(vfs: vfs::Vfs, perm_config: PermissionConfig) -> Self {
+    pub fn new(vfs: Arc<vfs::Vfs>, perm_config: PermissionConfig) -> Self {
         Self {
             inner: Arc::new(FilesystemInner { vfs, perm_config }),
         }

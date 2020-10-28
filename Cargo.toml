@@ -24,7 +24,7 @@ libc = "0.2.69"
 log = "0.4.8"
 lru-cache = "0.1.2"
 nix = "0.19.0"
-onedrive-api = "0.6.2"
+onedrive-api = "0.6.3"
 open = "1.4.0"
 reqwest = "0.10.4"
 serde = { version = "1.0.106", features = ["derive"] }
