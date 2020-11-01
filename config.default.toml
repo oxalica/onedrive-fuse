@@ -7,7 +7,7 @@ readonly = true
 #gid = 1000
 # The global umask (`umask`) and umask applied to files (`fmask`) and directories (`dmask`).
 # Default to be the umask of the current process.
-#umask
+#umask = 0o022
 #fmask = 0o022
 #dmask = 0o022
 
@@ -50,8 +50,6 @@ max_changes = 2048
 cache_ttl = 300
 
 [vfs.inode]
-# Size of LRU cache of inode metadata which are not referenced.
-dead_lru_cache_size = 4096
 
 [vfs.dir]
 # Size of LRU cache for contents of directories.

@@ -76,10 +76,10 @@ impl Vfs {
             },
         };
 
-        // TODO: FilePool.
+        // `FilePool` use download URL as snapshot and will not affected by changes.
         match event {
             tracker::Event::Clear => {
-                log::trace!("Clear all cache");
+                log::debug!("Clear all cache");
                 this.dir_pool.clear_cache();
                 this.inode_pool.clear_cache();
             }
