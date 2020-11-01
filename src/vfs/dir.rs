@@ -42,6 +42,9 @@ impl Cache {
     }
 
     fn insert(&mut self, item_id: ItemId, dir: DirContent) -> Option<DirContent> {
+        // Remove previous links first if exists.
+        self.remove(&item_id);
+
         // Pop LRU.
         if self.lru.len() == self.lru.capacity() {
             let (_, lru_dir) = self.lru.remove_lru().unwrap();
@@ -61,6 +64,14 @@ impl Cache {
         self.lru.insert(item_id, dir)
     }
 
+    fn remove(&mut self, item_id: &ItemId) -> Option<DirContent> {
+        let dir = self.lru.remove(item_id)?;
+        for ent in &dir.entries {
+            self.parent_map.remove(&ent.item_id);
+        }
+        Some(dir)
+    }
+
     fn clear(&mut self) {
         self.lru.clear();
         self.parent_map.clear();
@@ -69,24 +80,33 @@ impl Cache {
 
 #[derive(Debug)]
 struct DirContent {
+    state: DirState,
     entries: Vec<DirEntry>,
     /// name -> index of `entries`
     name_map: HashMap<String, usize>,
 }
 
-impl std::iter::FromIterator<DirEntry> for DirContent {
-    fn from_iter<T: IntoIterator<Item = DirEntry>>(iter: T) -> Self {
+#[derive(Debug, PartialEq, Eq)]
+enum DirState {
+    Full,
+    Partial,
+}
+
+impl DirContent {
+    fn new(state: DirState, iter: impl IntoIterator<Item = DirEntry>) -> Self {
         let entries = iter.into_iter().collect::<Vec<_>>();
         let name_map = entries
             .iter()
             .enumerate()
             .map(|(idx, ent)| (ent.name.clone(), idx))
             .collect();
-        Self { entries, name_map }
+        Self {
+            state,
+            entries,
+            name_map,
+        }
     }
-}
 
-impl DirContent {
     fn read(&self, offset: u64, count: usize) -> impl AsRef<[DirEntry]> {
         let len = self.entries.len();
         let start = usize::try_from(offset).unwrap_or(len).min(len);
@@ -133,15 +153,16 @@ impl DirPool {
         parent_id: &ItemId,
         offset: u64,
         count: usize,
-        inode_pool: &inode::InodePool,
         onedrive: &OneDrive,
     ) -> Result<impl AsRef<[DirEntry]>> {
         if let Some(dir) = self.cache.lock().unwrap().lru.get_mut(parent_id) {
-            return Ok(dir.read(offset, count));
+            if dir.state == DirState::Full {
+                return Ok(dir.read(offset, count));
+            }
         }
 
         // FIXME: Incremental fetching.
-        let children_fields = inode::InodeAttr::SELECT_FIELDS
+        let children_fields = inode::InodeAttr::ATTR_SELECT_FIELDS
             .iter()
             .chain(&[DriveItemField::id, DriveItemField::name])
             .map(|field| field.raw_name())
@@ -158,31 +179,37 @@ impl DirPool {
             .await?
             .expect("No If-None-Match");
 
-        let snapshot = dir_item
-            .children
-            .unwrap()
-            .into_iter()
-            .map(|item| {
+        let dir = DirContent::new(
+            DirState::Full,
+            dir_item.children.unwrap().into_iter().map(|item| {
                 let attr = inode::InodeAttr::parse_item(&item).expect("Invalid DriveItem");
                 let name = item.name.unwrap();
                 let item_id = item.id.unwrap();
-                inode_pool.touch(&item_id, attr.clone());
                 DirEntry {
                     item_id,
                     name,
                     attr,
                 }
-            })
-            .collect::<DirContent>();
+            }),
+        );
 
-        let ret = snapshot.read(offset, count);
+        let ret = dir.read(offset, count);
 
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(parent_id.clone(), snapshot);
+        self.cache.lock().unwrap().insert(parent_id.clone(), dir);
 
         Ok(ret)
+    }
+
+    /// Query InodeAttr by item id from cache.
+    pub fn get_item_attr_cache(&self, item_id: &ItemId) -> Option<inode::InodeAttr> {
+        let mut cache = self.cache.lock().unwrap();
+        let cache = &mut *cache;
+        let (parent_id, idx) = cache.parent_map.get(&item_id)?;
+        Some(
+            cache.lru.get_mut(parent_id).unwrap().entries[*idx]
+                .attr
+                .clone(),
+        )
     }
 
     /// Lookup name of a directory in cache and return ItemId.
@@ -192,7 +219,33 @@ impl DirPool {
     /// `Some(Some(_))` for found.
     pub fn lookup_cache(&self, parent_id: &ItemId, name: &str) -> Option<Option<DirEntry>> {
         let mut cache = self.cache.lock().unwrap();
-        Some(cache.lru.get_mut(parent_id)?.lookup(name).cloned())
+        let dir = cache.lru.get_mut(parent_id)?;
+        match dir.lookup(name).cloned() {
+            Some(ent) => Some(Some(ent)),
+            None if dir.state == DirState::Full => Some(None),
+            None => None,
+        }
+    }
+
+    /// Cache a child of a directory if not cached.
+    pub fn touch(&self, parent_id: ItemId, entry: DirEntry) {
+        let mut cache = self.cache.lock().unwrap();
+        let cache = &mut *cache;
+        match cache.lru.get_mut(&parent_id) {
+            Some(dir) => match dir.state {
+                DirState::Full => {}
+                DirState::Partial => {
+                    // Only insert if not already cached.
+                    if cache.parent_map.get_mut(&entry.item_id).is_none() {
+                        dir.insert(entry, parent_id, &mut cache.parent_map);
+                    }
+                }
+            },
+            None => {
+                let dir = DirContent::new(DirState::Partial, std::iter::once(entry));
+                cache.insert(parent_id, dir);
+            }
+        }
     }
 
     /// Clear all cache.
@@ -231,10 +284,13 @@ impl DirPool {
 
             let item_name = item.name.as_ref().unwrap();
             let item_attr = inode::InodeAttr::parse_item(&item).unwrap();
-            let cur_parent_id = match &item_attr.parent_item_id {
+            let cur_parent_id = match inode::InodeAttr::parse_parent_id(item) {
                 Some(id) => id,
-                // Only root directory itself has no parent.
-                None => continue,
+                None => {
+                    // Only root directory itself has no parent.
+                    assert!(item.root.is_some());
+                    continue;
+                }
             };
 
             // 2. Insert the new item if the new parent directory is already in cache.

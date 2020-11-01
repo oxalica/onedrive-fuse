@@ -133,7 +133,7 @@ impl Vfs {
     pub async fn get_attr(&self, ino: u64) -> Result<(InodeAttr, Duration)> {
         let attr = self
             .inode_pool
-            .get_attr(ino, &*self.onedrive().await)
+            .get_attr(ino, &self.dir_pool, &*self.onedrive().await)
             .await?;
         log::trace!(target: "vfs::inode", "get_attr: ino={} attr={:?}", ino, attr);
         Ok((attr, self.ttl()))
@@ -161,13 +161,7 @@ impl Vfs {
         let parent_id = self.inode_pool.get_item_id(ino)?;
         let ret = self
             .dir_pool
-            .read(
-                &parent_id,
-                offset,
-                count,
-                &self.inode_pool,
-                &*self.onedrive().await,
-            )
+            .read(&parent_id, offset, count, &*self.onedrive().await)
             .await?;
         log::trace!(target: "vfs::dir", "read_dir: ino={} offset={}", ino, offset);
         Ok(ret)
