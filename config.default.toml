@@ -38,7 +38,7 @@ min_live_time = 60
 # otherwise, it will lead to inconsistency.
 enable = true
 # Period in seconds to poll change events.
-period = 30
+period = 10
 # Page size when fetching changes.
 fetch_page_size = 512
 # Max changes can be updated. If there are too many changes between two polling, all cache will be dropped
