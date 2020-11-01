@@ -142,7 +142,7 @@ async fn get_delta_url_with_option(
                 .page_size(config.fetch_page_size.into())
                 .select(&[
                     DriveItemField::id,
-                    DriveItemField::c_tag,
+                    DriveItemField::name,
                     DriveItemField::deleted,
                     DriveItemField::parent_reference,
                 ])

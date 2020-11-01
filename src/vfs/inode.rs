@@ -250,19 +250,13 @@ impl InodePool {
         let parent_item_id = self.get_item_id(parent_ino)?;
         let child_name = cvt_filename(child_name)?;
 
-        match dir_pool.lookup(&parent_item_id, child_name.as_str()) {
+        match dir_pool.lookup_cache(&parent_item_id, child_name.as_str()) {
             // Cache hit and item is not found.
             Some(None) => return Err(Error::NotFound),
             // Cache hit and item is found.
-            Some(Some(item_id)) => {
-                // Release the guard before going into if.
-                let ino = self.alive.lock().unwrap().get_ino(&item_id);
-                if let Some(ino) = ino {
-                    // If it is allocated, get InodeAttr.
-                    let attr = self.get_attr(ino, onedrive).await?;
-                    return Ok((ino, attr));
-                }
-                // Otherwise, we still need to fetch for InodeAttr.
+            Some(Some(ent)) => {
+                let ino = self.acquire_or_alloc_with_attr(&ent.item_id, ent.attr.clone());
+                return Ok((ino, ent.attr));
             }
             // Cache miss.
             None => {}
@@ -331,7 +325,10 @@ impl InodePool {
                 dead.remove(item_id);
             } else {
                 let attr = InodeAttr::parse_item(item).unwrap();
-                self.touch(item_id, attr);
+                // We cannot use `touch` here, or we will enter a deadlock over `self.alive`.
+                if let Some(ino) = alive.get_ino(item_id) {
+                    *alive.get(ino).unwrap().attr.lock().unwrap() = Some(attr);
+                }
             }
         }
     }
