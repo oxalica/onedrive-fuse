@@ -56,9 +56,5 @@ dead_lru_cache_size = 4096
 [vfs.dir]
 # Size of LRU cache for contents of directories.
 lru_cache_size = 4096
-# Cache timeout in seconds for content of directories.
-# If content is expired but still in LRU cache, it will check whether the content is changed
-# using cTag and may refresh the cache.
-cache_ttl = 30
 
 [vfs.file]

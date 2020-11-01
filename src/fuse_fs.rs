@@ -13,6 +13,8 @@ const NAME_LEN: u32 = 2048;
 const BLOCK_SIZE: u32 = 512;
 const FRAGMENT_SIZE: u32 = 512;
 
+const READDIR_CHUNK_SIZE: usize = 64;
+
 pub struct Filesystem {
     inner: Arc<FilesystemInner>,
 }
@@ -160,7 +162,11 @@ impl fuse::Filesystem for Filesystem {
     ) {
         let offset = u64::try_from(offset).unwrap();
         self.spawn(|inner| async move {
-            match inner.vfs.read_dir(ino, fh, offset).await {
+            match inner
+                .vfs
+                .read_dir(ino, fh, offset, READDIR_CHUNK_SIZE)
+                .await
+            {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok(entries) => {
                     for (idx, entry) in entries.as_ref().iter().enumerate() {

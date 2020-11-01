@@ -76,13 +76,15 @@ impl Vfs {
             },
         };
 
-        // TODO: DirPool and FilePool.
+        // TODO: FilePool.
         match event {
             tracker::Event::Clear => {
                 log::trace!("Clear all cache");
+                this.dir_pool.clear_cache();
                 this.inode_pool.clear_cache();
             }
             tracker::Event::Update(items) => {
+                this.dir_pool.sync_items(&items);
                 this.inode_pool.sync_items(&items);
             }
         }
@@ -137,25 +139,37 @@ impl Vfs {
         Ok((attr, self.ttl()))
     }
 
+    // fh is not used for directories.
     pub async fn open_dir(&self, ino: u64) -> Result<u64> {
-        let item_id = self.inode_pool.get_item_id(ino)?;
-        let fh = self
-            .dir_pool
-            .open(&item_id, &self.inode_pool, &*self.onedrive().await)
-            .await?;
-        log::trace!(target: "vfs::dir", "open_dir: ino={} fh={}", ino, fh);
-        Ok(fh)
+        log::trace!(target: "vfs::dir", "open_dir: ino={}", ino);
+        Ok(0)
     }
 
-    pub async fn close_dir(&self, ino: u64, fh: u64) -> Result<()> {
-        self.dir_pool.close(fh)?;
-        log::trace!(target: "vfs::dir", "close_dir: ino={} fh={}", ino, fh);
+    // fh is not used for directories.
+    pub async fn close_dir(&self, ino: u64, _fh: u64) -> Result<()> {
+        log::trace!(target: "vfs::dir", "close_dir: ino={}", ino);
         Ok(())
     }
 
-    pub async fn read_dir(&self, ino: u64, fh: u64, offset: u64) -> Result<impl AsRef<[DirEntry]>> {
-        let ret = self.dir_pool.read(fh, offset).await?;
-        log::trace!(target: "vfs::dir", "read_dir: ino={} fh={} offset={}", ino, fh, offset);
+    pub async fn read_dir(
+        &self,
+        ino: u64,
+        _fh: u64,
+        offset: u64,
+        count: usize,
+    ) -> Result<impl AsRef<[DirEntry]>> {
+        let parent_id = self.inode_pool.get_item_id(ino)?;
+        let ret = self
+            .dir_pool
+            .read(
+                &parent_id,
+                offset,
+                count,
+                &self.inode_pool,
+                &*self.onedrive().await,
+            )
+            .await?;
+        log::trace!(target: "vfs::dir", "read_dir: ino={} offset={}", ino, offset);
         Ok(ret)
     }
 
