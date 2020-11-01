@@ -7,7 +7,7 @@ readonly = true
 #gid = 1000
 # The global umask (`umask`) and umask applied to files (`fmask`) and directories (`dmask`).
 # Default to be the umask of the current process.
-#umask
+#umask = 0o022
 #fmask = 0o022
 #dmask = 0o022
 
@@ -31,22 +31,28 @@ time_before_expire = 600
 # of `time_before_expire` reached.
 min_live_time = 60
 
+[vfs.tracker]
+# Enable incremental tracking for remote side changes periodically.
+# Any content or attributes changed on remote side will cause local cache to be updated or invalidated.
+# If tracking is disabled, we assume that nothing can be changed on remote side once fetched,
+# otherwise, it will lead to inconsistency.
+enable = true
+# Period in seconds to poll change events.
+period = 10
+# Page size when fetching changes.
+fetch_page_size = 512
+# Max changes can be updated. If there are too many changes between two polling, all cache will be dropped
+# and tracking is re-started from current state.
+max_changes = 2048
+
 [vfs.statfs]
 # Cache timeout in seconds for statfs information.
 cache_ttl = 300
 
 [vfs.inode]
-# Cache timeout in seconds for inode metadata.
-attr_cache_ttl = 30
-# Size of LRU cache of inode metadata which are not referenced.
-dead_lru_cache_size = 4096
 
 [vfs.dir]
 # Size of LRU cache for contents of directories.
 lru_cache_size = 4096
-# Cache timeout in seconds for content of directories.
-# If content is expired but still in LRU cache, it will check whether the content is changed
-# using cTag and may refresh the cache.
-cache_ttl = 30
 
 [vfs.file]

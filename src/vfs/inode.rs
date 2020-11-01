@@ -1,11 +1,7 @@
-use crate::{
-    config::de_duration_sec,
-    vfs::{
-        dir,
-        error::{Error, Result},
-    },
+use crate::vfs::{
+    dir,
+    error::{Error, Result},
 };
-use lru_cache::LruCache;
 use onedrive_api::{
     option::ObjectOption,
     resource::{DriveItem, DriveItemField},
@@ -15,76 +11,59 @@ use serde::Deserialize;
 use std::{
     collections::hash_map::{Entry, HashMap},
     ffi::OsStr,
-    sync::{Arc, Mutex as SyncMutex},
-    time::{Duration, Instant},
+    sync::Mutex as SyncMutex,
+    time::SystemTime,
 };
-use time::Timespec;
-use tokio::sync::Mutex;
 
 #[derive(Debug, Deserialize)]
-pub struct Config {
-    #[serde(deserialize_with = "de_duration_sec")]
-    attr_cache_ttl: Duration,
-    dead_lru_cache_size: usize,
-}
+pub struct Config {}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct InodeAttr {
     pub size: u64,
-    pub mtime: Timespec,
-    pub crtime: Timespec,
+    pub mtime: SystemTime,
+    pub crtime: SystemTime,
     pub is_directory: bool,
 }
 
 impl InodeAttr {
-    pub const SELECT_FIELDS: &'static [DriveItemField] = &[
-        DriveItemField::id,
+    pub const ATTR_SELECT_FIELDS: &'static [DriveItemField] = &[
         DriveItemField::size,
         DriveItemField::last_modified_date_time,
         DriveItemField::created_date_time,
         DriveItemField::folder,
     ];
 
-    async fn fetch(loc: ItemLocation<'_>, onedrive: &OneDrive) -> Result<(ItemId, InodeAttr)> {
-        // The reply is quite small and we don't need to check changes with eTag.
-        let item = onedrive
-            .get_item_with_option(loc, ObjectOption::new().select(Self::SELECT_FIELDS))
-            .await?
-            .expect("No If-None-Match");
-        Self::parse_drive_item(&item)
-    }
-
-    pub fn parse_drive_item(item: &DriveItem) -> Result<(ItemId, InodeAttr)> {
-        fn parse_time(s: &str) -> Timespec {
-            // FIXME
-            time::strptime(s, "%Y-%m-%dT%H:%M:%S.%f%z")
-                .or_else(|_| time::strptime(s, "%Y-%m-%dT%H:%M:%S%z"))
-                .unwrap_or_else(|err| panic!("Invalid time '{}': {}", s, err))
-                .to_timespec()
+    pub fn parse_item(item: &DriveItem) -> Option<InodeAttr> {
+        fn parse_time(s: &str) -> Option<SystemTime> {
+            humantime::parse_rfc3339(s).ok()
         }
 
-        let item_id = item.id.clone().unwrap();
-        let attr = InodeAttr {
-            size: item.size.unwrap() as u64,
-            mtime: parse_time(item.last_modified_date_time.as_deref().unwrap()),
-            crtime: parse_time(item.created_date_time.as_deref().unwrap()),
+        Some(InodeAttr {
+            size: item.size? as u64,
+            mtime: parse_time(item.last_modified_date_time.as_deref()?)?,
+            crtime: parse_time(item.created_date_time.as_deref()?)?,
             is_directory: item.folder.is_some(),
-        };
-        Ok((item_id, attr))
+        })
+    }
+
+    pub fn parse_parent_id(item: &DriveItem) -> Option<ItemId> {
+        // https://docs.microsoft.com/en-us/graph/api/resources/itemreference?view=graph-rest-1.0
+        let id = item.parent_reference.as_ref()?.get("id")?.as_str()?;
+        Some(ItemId(id.to_owned()))
     }
 }
 
-// Lock order: field order.
 pub struct InodePool {
     alive: SyncMutex<AliveInodePool>,
-    dead: SyncMutex<LruCache<ItemId, Arc<Inode>>>,
-    config: Config,
+    root_attr: SyncMutex<Option<InodeAttr>>,
 }
 
 struct AliveInodePool {
     inode_counter: u64,
-    /// inode_id -> (reference_count, Inode)
-    map: HashMap<u64, (u64, Arc<Inode>)>,
+    /// ino -> (reference_count, item_id)
+    map: HashMap<u64, (u64, ItemId)>,
+    /// item_id -> ino
     rev_map: HashMap<ItemId, u64>,
 }
 
@@ -97,11 +76,11 @@ impl AliveInodePool {
         }
     }
 
-    /// Get the node by inode id.
-    fn get(&self, ino: u64) -> Result<Arc<Inode>> {
+    /// Get the item_id by inode id.
+    fn get(&self, ino: u64) -> Result<ItemId> {
         self.map
             .get(&ino)
-            .map(|(_, node)| node.clone())
+            .map(|(_, item_id)| item_id.clone())
             .ok_or(Error::InvalidInode(ino))
     }
 
@@ -118,25 +97,25 @@ impl AliveInodePool {
     }
 
     /// Allocate a new inode with 1 reference count and return the inode id.
-    fn alloc(&mut self, node: Arc<Inode>) -> u64 {
+    fn alloc(&mut self, item_id: ItemId) -> u64 {
         let ino = self.inode_counter;
         self.inode_counter += 1;
-        assert!(self.rev_map.insert(node.item_id.clone(), ino).is_none());
-        assert!(self.map.insert(ino, (1, node)).is_none());
+        assert!(self.rev_map.insert(item_id.clone(), ino).is_none());
+        assert!(self.map.insert(ino, (1, item_id)).is_none());
         ino
     }
 
     /// Decrease reference count by `count` and optionally remove the entry.
     /// Return the node if it is removed.
-    fn free(&mut self, ino: u64, count: u64) -> Result<Option<Arc<Inode>>> {
+    fn free(&mut self, ino: u64, count: u64) -> Result<Option<ItemId>> {
         match self.map.entry(ino) {
             Entry::Vacant(_) => Err(Error::InvalidInode(ino)),
             Entry::Occupied(mut ent) => {
                 assert!(count <= ent.get_mut().0);
                 if ent.get_mut().0 == count {
-                    let (_, node) = ent.remove();
-                    assert!(self.rev_map.remove(&node.item_id).is_some());
-                    Ok(Some(node))
+                    let (_, item_id) = ent.remove();
+                    assert!(self.rev_map.remove(&item_id).is_some());
+                    Ok(Some(item_id))
                 } else {
                     ent.get_mut().0 -= count;
                     Ok(None)
@@ -146,96 +125,43 @@ impl AliveInodePool {
     }
 }
 
-struct Inode {
-    item_id: ItemId,
-    attr: Mutex<(InodeAttr, Instant)>,
-}
-
 impl InodePool {
     const ROOT_ID: u64 = fuse::FUSE_ROOT_ID;
 
     /// Initialize inode pool with root id to make operation on root nothing special.
-    pub async fn new(config: Config, onedrive: &OneDrive) -> Result<Self> {
+    pub async fn new(_config: Config, onedrive: &OneDrive) -> Result<Self> {
         // Should be small.
         static_assertions::const_assert_eq!(InodePool::ROOT_ID, 1);
 
-        let (root_id, root_attr) = InodeAttr::fetch(ItemLocation::root(), onedrive).await?;
-        let fetch_time = Instant::now();
+        let root_item = onedrive
+            .get_item_with_option(
+                ItemLocation::root(),
+                ObjectOption::new()
+                    .select(&[DriveItemField::id])
+                    .select(InodeAttr::ATTR_SELECT_FIELDS),
+            )
+            .await?
+            .expect("No If-None-Match");
+        let root_attr = InodeAttr::parse_item(&root_item).unwrap();
 
         let mut alive = AliveInodePool::new(Self::ROOT_ID);
-        let root_node = Arc::new(Inode {
-            item_id: root_id,
-            attr: Mutex::new((root_attr, fetch_time)),
-        });
-        alive.alloc(root_node);
+        // Never freed.
+        alive.alloc(root_item.id.unwrap());
 
         Ok(Self {
             alive: SyncMutex::new(alive),
-            dead: SyncMutex::new(LruCache::new(config.dead_lru_cache_size)),
-            config,
+            root_attr: SyncMutex::new(Some(root_attr)),
         })
-    }
-
-    /// Get inode by item_id without increasing its ref-count.
-    /// Inode data may or may not be cached.
-    ///
-    /// This is used in `readdir`.
-    pub async fn touch(&self, item_id: &ItemId, attr: InodeAttr, fetch_time: Instant) {
-        let node = {
-            let alive = self.alive.lock().unwrap();
-            match alive.get_ino(item_id) {
-                Some(ino) => alive.get(ino).unwrap(),
-                None => {
-                    // Hold both mutex guards to avoid race.
-                    let mut dead = self.dead.lock().unwrap();
-                    let node = Arc::new(Inode {
-                        item_id: item_id.clone(),
-                        attr: Mutex::new((attr, fetch_time)),
-                    });
-                    dead.insert(item_id.clone(), node);
-                    return;
-                }
-            }
-        };
-        // We cannot use `await` when holding guard.
-        let mut cache = node.attr.lock().await;
-        // Only update if later.
-        if cache.1 < fetch_time {
-            *cache = (attr, fetch_time);
-        }
     }
 
     /// Update InodeAttr of existing inode or allocate a new inode,
     /// also increase the reference count.
-    async fn acquire_or_alloc_with_attr(
-        &self,
-        item_id: &ItemId,
-        attr: InodeAttr,
-        fetch_time: Instant,
-    ) -> u64 {
-        let (ino, node) = {
-            let mut alive = self.alive.lock().unwrap();
-            match alive.acquire_ino(item_id) {
-                Some(ino) => (ino, alive.get(ino).unwrap()),
-                None => {
-                    // Not found in cache, allocate a new inode.
-                    let node = Arc::new(Inode {
-                        item_id: item_id.clone(),
-                        attr: Mutex::new((attr, fetch_time)),
-                    });
-                    let ino = alive.alloc(node);
-                    return ino;
-                }
-            }
-        };
-
-        // We cannot use `await` when holding mutex guard above.
-        let mut cache = node.attr.lock().await;
-        // Only update if later.
-        if cache.1 < fetch_time {
-            *cache = (attr, fetch_time);
+    fn acquire_or_alloc(&self, item_id: &ItemId) -> u64 {
+        let mut alive = self.alive.lock().unwrap();
+        match alive.acquire_ino(item_id) {
+            Some(ino) => ino,
+            None => alive.alloc(item_id.clone()),
         }
-        ino
     }
 
     pub async fn lookup(
@@ -244,75 +170,132 @@ impl InodePool {
         child_name: &OsStr,
         dir_pool: &dir::DirPool,
         onedrive: &OneDrive,
-    ) -> Result<(u64, InodeAttr, Duration)> {
+    ) -> Result<(u64, InodeAttr)> {
         let parent_item_id = self.get_item_id(parent_ino)?;
         let child_name = cvt_filename(child_name)?;
 
-        match dir_pool.lookup(&parent_item_id, child_name.as_str()).await {
-            // Cache hit but item not found.
+        match dir_pool.lookup_cache(&parent_item_id, child_name.as_str()) {
+            // Cache hit and item is not found.
             Some(None) => return Err(Error::NotFound),
-            // Cache hit and item found.
-            Some(Some((ent, ttl))) => {
-                let ino = self
-                    .acquire_or_alloc_with_attr(&ent.item_id, ent.attr, Instant::now() - ttl)
-                    .await;
-                return Ok((ino, ent.attr, ttl));
+            // Cache hit and item is found.
+            Some(Some(ent)) => {
+                let ino = self.acquire_or_alloc(&ent.item_id);
+                return Ok((ino, ent.attr));
             }
             // Cache miss.
             None => {}
         }
 
-        // Fetch.
-        let (item_id, attr) = InodeAttr::fetch(
-            ItemLocation::child_of_id(&parent_item_id, child_name),
-            onedrive,
-        )
-        .await?;
-        let fetch_time = Instant::now();
+        log::debug!("lookup: cache miss for: {}", child_name.as_str());
 
-        let ino = self
-            .acquire_or_alloc_with_attr(&item_id, attr, fetch_time)
-            .await;
-        let ttl = self.config.attr_cache_ttl;
-        Ok((ino, attr, ttl))
+        // Fetch.
+        let item = onedrive
+            .get_item_with_option(
+                ItemLocation::child_of_id(&parent_item_id, child_name),
+                ObjectOption::new()
+                    .select(&[DriveItemField::id, DriveItemField::name])
+                    .select(InodeAttr::ATTR_SELECT_FIELDS),
+            )
+            .await?
+            .expect("No If-None-Match");
+        let attr = InodeAttr::parse_item(&item).unwrap();
+        let item_id = item.id.unwrap();
+
+        dir_pool.touch(
+            parent_item_id,
+            dir::DirEntry {
+                name: item.name.unwrap(),
+                item_id: item_id.clone(),
+                attr: attr.clone(),
+            },
+        );
+
+        let ino = self.acquire_or_alloc(&item_id);
+        Ok((ino, attr))
     }
 
     /// Decrease reference count of an inode by `count`.
     /// Return if it is freed.
     pub async fn free(&self, ino: u64, count: u64) -> Result<bool> {
         let mut alive = self.alive.lock().unwrap();
-        if let Some(node) = alive.free(ino, count)? {
-            // When freed, put it into cache to allow reusing metadata.
-            // Hold both mutex guards to avoid race.
-            self.dead.lock().unwrap().insert(node.item_id.clone(), node);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(alive.free(ino, count)?.is_some())
     }
 
-    pub async fn get_attr(&self, ino: u64, onedrive: &OneDrive) -> Result<(InodeAttr, Duration)> {
-        let node = self.alive.lock().unwrap().get(ino)?;
-        let mut attr = node.attr.lock().await;
-
-        // Check if cache is outdated.
-        if let Some(ttl) = self.config.attr_cache_ttl.checked_sub(attr.1.elapsed()) {
-            return Ok((attr.0, ttl));
+    /// Get InodeAttr of an existing inode.
+    pub async fn get_attr(
+        &self,
+        ino: u64,
+        dir_pool: &dir::DirPool,
+        onedrive: &OneDrive,
+    ) -> Result<InodeAttr> {
+        let item_id = self.get_item_id(ino)?;
+        if ino == Self::ROOT_ID {
+            if let Some(attr) = &*self.root_attr.lock().unwrap() {
+                return Ok(attr.clone());
+            }
+        } else if let Some(attr) = dir_pool.get_item_attr_cache(&item_id) {
+            return Ok(attr);
         }
 
-        // Cache outdated. Hold the mutex during the request.
-        log::debug!("cache miss");
-        let (_, new_attr) =
-            InodeAttr::fetch(ItemLocation::from_id(&node.item_id), onedrive).await?;
-        // Refresh cache.
-        *attr = (new_attr, Instant::now());
+        log::debug!("get_attr: cache miss for {:?}", item_id);
 
-        let ttl = self.config.attr_cache_ttl;
-        Ok((new_attr, ttl))
+        let item = onedrive
+            .get_item_with_option(
+                ItemLocation::from_id(&item_id),
+                ObjectOption::new()
+                    .select(&[
+                        DriveItemField::name,
+                        DriveItemField::root,
+                        DriveItemField::parent_reference,
+                    ])
+                    .select(InodeAttr::ATTR_SELECT_FIELDS),
+            )
+            .await?
+            .expect("No If-None-Match");
+        let attr = InodeAttr::parse_item(&item).unwrap();
+
+        match InodeAttr::parse_parent_id(&item) {
+            Some(parent_id) => {
+                dir_pool.touch(
+                    parent_id,
+                    dir::DirEntry {
+                        name: item.name.unwrap(),
+                        item_id,
+                        attr: attr.clone(),
+                    },
+                );
+            }
+            // Root directory.
+            None => {
+                assert_eq!(ino, Self::ROOT_ID);
+                *self.root_attr.lock().unwrap() = Some(attr.clone());
+            }
+        }
+
+        Ok(attr)
     }
 
+    /// Get item id from an existing inode.
     pub fn get_item_id(&self, ino: u64) -> Result<ItemId> {
-        Ok(self.alive.lock().unwrap().get(ino)?.item_id.clone())
+        Ok(self.alive.lock().unwrap().get(ino)?)
+    }
+
+    /// Clear all cache.
+    pub fn clear_cache(&self) {
+        *self.root_attr.lock().unwrap() = None;
+    }
+
+    /// Sync item changes from remote.
+    pub fn sync_items(&self, items: &[DriveItem]) {
+        // We only concern about the root item.
+        let mut root_attr = self.root_attr.lock().unwrap();
+        for item in items {
+            if item.root.is_some() {
+                assert!(item.deleted.is_none());
+                let attr = InodeAttr::parse_item(item).unwrap();
+                *root_attr = Some(attr);
+            }
+        }
     }
 }
 
