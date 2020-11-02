@@ -56,3 +56,7 @@ cache_ttl = 300
 lru_cache_size = 4096
 
 [vfs.file]
+# Max number of chunks the streaming download buffer holds.
+# Once it's full (when read speed is slower than download speed), downloading is temporary blocked.
+# Chunks are from low-level connection. A chunk is about 4~16 KiB.
+stream_buffer_chunks = 256

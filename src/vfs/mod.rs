@@ -172,7 +172,7 @@ impl Vfs {
         let item_id = self.inode_pool.get_item_id(ino)?;
         let fh = self
             .file_pool
-            .open(&item_id, &*self.onedrive().await)
+            .open(&item_id, &*self.onedrive().await, &self.client)
             .await?;
         log::trace!(target: "vfs::file", "open_file: ino={} fh={}", ino, fh);
         Ok(fh)
@@ -191,7 +191,7 @@ impl Vfs {
         offset: u64,
         size: usize,
     ) -> Result<impl AsRef<[u8]>> {
-        let ret = self.file_pool.read(fh, offset, size, &self.client).await?;
+        let ret = self.file_pool.read(fh, offset, size).await?;
         log::trace!(
             target: "vfs::file",
             "read_file: ino={} fh={} offset={} size={} bytes_read={}",

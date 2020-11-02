@@ -18,10 +18,8 @@ pub enum Error {
     ApiDeserializeError(#[from] serde_json::Error),
     #[error("reqwest error: {0}")]
     ReqwestError(#[from] reqwest::Error),
-    #[error("Unexpected end of download stream at {current_pos}")]
-    UnexpectedEndOfDownload { current_pos: u64 },
-    #[error("Invalid response from request with Range")]
-    InvalidRangeResponse,
+    #[error("Unexpected end of download stream, read {current_pos}/{file_size}")]
+    UnexpectedEndOfDownload { current_pos: u64, file_size: u64 },
 
     // Not supported.
     #[error("Nonsequential read is not supported: current at {current_pos} but try to read {try_offset}")]
@@ -59,8 +57,7 @@ impl Error {
             Self::ApiError(_)
             | Self::ApiDeserializeError(_)
             | Self::ReqwestError(_)
-            | Self::UnexpectedEndOfDownload { .. }
-            | Self::InvalidRangeResponse => {
+            | Self::UnexpectedEndOfDownload { .. } => {
                 log::error!("{}", self);
                 libc::EIO
             }
