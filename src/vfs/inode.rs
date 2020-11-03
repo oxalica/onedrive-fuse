@@ -129,7 +129,7 @@ impl InodePool {
     const ROOT_ID: u64 = fuse::FUSE_ROOT_ID;
 
     /// Initialize inode pool with root id to make operation on root nothing special.
-    pub async fn new(_config: Config, onedrive: &OneDrive) -> Result<Self> {
+    pub async fn new(_config: Config, onedrive: &OneDrive) -> anyhow::Result<Self> {
         // Should be small.
         static_assertions::const_assert_eq!(InodePool::ROOT_ID, 1);
 

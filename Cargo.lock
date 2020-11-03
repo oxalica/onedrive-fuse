@@ -723,6 +723,7 @@ dependencies = [
  "sharded-slab",
  "static_assertions",
  "structopt",
+ "tempfile",
  "thiserror",
  "time",
  "tokio",

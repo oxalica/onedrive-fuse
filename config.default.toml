@@ -60,3 +60,21 @@ lru_cache_size = 4096
 # Once it's full (when read speed is slower than download speed), downloading is temporary blocked.
 # Chunks are from low-level connection. A chunk is about 4~16 KiB.
 stream_buffer_chunks = 256
+
+[vfs.file.disk_cache]
+# Whether to enable on-disk file cache.
+# Files smaller than `max_cached_file_size` are saved in LRU cache directory on disk.
+# When they are opened and not removed from cache, a downloding thread is running in background to
+# download the whole content of the file, though maybe programs only read some bytes of it.
+# Note that if a file still opened, it will never be removed from LRU cache.
+enable = true
+# The cache directory. Default to be `onedrive_fuse-cache` under system temporary directory.
+#path = "/tmp/onedrive_fuse-cache"
+# Max file size in cache. Default to be 16 MiB.
+# Files larger than it will not be cached and can only read as stream.
+max_cached_file_size = 16777216
+# Max file count in cache.
+max_files = 1024
+# Max total file size in cache. Default to be 256 MiB.
+# This must be not less than `max_cached_file_size`.
+max_total_size = 268435456

@@ -67,7 +67,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] lookup cache
     - [x] readdir cache
   - [x] Sync remote changes with local cache
-  - [ ] Read cache
+  - [x] Read cache
   - [ ] Write cache
 
 ## License

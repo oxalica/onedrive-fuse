@@ -41,7 +41,7 @@ pub struct Vfs {
 }
 
 impl Vfs {
-    pub async fn new(config: Config, onedrive: ManagedOnedrive) -> Result<Arc<Self>> {
+    pub async fn new(config: Config, onedrive: ManagedOnedrive) -> anyhow::Result<Arc<Self>> {
         // Initialize tracker before everything else.
         let this_referrer = Arc::new(SyncMutex::new(None));
         let this_referrer2 = this_referrer.clone();
@@ -57,7 +57,7 @@ impl Vfs {
             statfs: statfs::Statfs::new(config.statfs),
             inode_pool,
             dir_pool: dir::DirPool::new(config.dir),
-            file_pool: file::FilePool::new(config.file),
+            file_pool: file::FilePool::new(config.file)?,
             tracker,
             onedrive,
             client: Client::new(),

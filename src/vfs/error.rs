@@ -21,6 +21,10 @@ pub enum Error {
     #[error("Unexpected end of download stream, read {current_pos}/{file_size}")]
     UnexpectedEndOfDownload { current_pos: u64, file_size: u64 },
 
+    // IO error.
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
     // Not supported.
     #[error("Nonsequential read is not supported: current at {current_pos} but try to read {try_offset}")]
     NonsequentialRead { current_pos: u64, try_offset: u64 },
@@ -57,7 +61,8 @@ impl Error {
             Self::ApiError(_)
             | Self::ApiDeserializeError(_)
             | Self::ReqwestError(_)
-            | Self::UnexpectedEndOfDownload { .. } => {
+            | Self::UnexpectedEndOfDownload { .. }
+            | Self::IoError(_) => {
                 log::error!("{}", self);
                 libc::EIO
             }

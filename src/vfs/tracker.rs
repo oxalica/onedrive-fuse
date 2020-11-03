@@ -1,8 +1,4 @@
-use crate::{
-    config::de_duration_sec,
-    login::ManagedOnedrive,
-    vfs::{self, inode::InodeAttr},
-};
+use crate::{config::de_duration_sec, login::ManagedOnedrive, vfs::inode::InodeAttr};
 use onedrive_api::{
     option::CollectionOption,
     resource::{DriveItem, DriveItemField},
@@ -46,7 +42,7 @@ impl Tracker {
         handler: EventHandler,
         onedrive: ManagedOnedrive,
         config: Config,
-    ) -> vfs::Result<Self> {
+    ) -> anyhow::Result<Self> {
         if !config.enable {
             return Ok(Self {
                 last_sync_time: None,
