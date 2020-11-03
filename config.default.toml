@@ -60,6 +60,10 @@ lru_cache_size = 4096
 # Once it's full (when read speed is slower than download speed), downloading is temporary blocked.
 # Chunks are from low-level connection. A chunk is about 4~16 KiB.
 stream_buffer_chunks = 256
+# Max retries to resume download when connection lost before raising error.
+download_max_retry = 5
+# Delay in seconds between each retry.
+download_retry_delay = 5
 
 [vfs.file.disk_cache]
 # Whether to enable on-disk file cache.

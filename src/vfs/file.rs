@@ -1,7 +1,11 @@
-use crate::vfs::{Error, Result};
+use crate::{
+    config::de_duration_sec,
+    vfs::{Error, Result},
+};
 use bytes::Bytes;
 use lru_cache::LruCache;
 use onedrive_api::{ItemId, ItemLocation, OneDrive};
+use reqwest::{header, StatusCode};
 use serde::Deserialize;
 use sharded_slab::Slab;
 use std::{
@@ -12,6 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex as SyncMutex, Weak,
     },
+    time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -21,7 +26,16 @@ use tokio::{
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     stream_buffer_chunks: usize,
+    #[serde(flatten)]
+    retry: RetryConfig,
     disk_cache: DiskCacheConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct RetryConfig {
+    download_max_retry: usize,
+    #[serde(deserialize_with = "de_duration_sec")]
+    download_retry_delay: Duration,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -49,7 +63,7 @@ impl FilePool {
         Ok(Self {
             handles: Slab::new(),
             disk_cache: if config.disk_cache.enable {
-                Some(DiskCache::new(config.disk_cache.clone())?)
+                Some(DiskCache::new(config.clone())?)
             } else {
                 None
             },
@@ -98,7 +112,7 @@ impl FilePool {
         };
 
         log::debug!("Streaming file {:?}, url: {}", item_id, download_url);
-        let state = FileStreamState::fetch(download_url, client.clone(), &self.config);
+        let state = FileStreamState::fetch(file_size, download_url, client.clone(), &self.config);
         Ok(File::Streaming {
             file_size,
             state: Arc::new(Mutex::new(state)),
@@ -176,9 +190,20 @@ struct FileStreamState {
 }
 
 impl FileStreamState {
-    fn fetch(download_url: String, client: reqwest::Client, config: &Config) -> Self {
+    fn fetch(
+        file_size: u64,
+        download_url: String,
+        client: reqwest::Client,
+        config: &Config,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(config.stream_buffer_chunks);
-        tokio::spawn(download_thread(download_url, tx, client));
+        tokio::spawn(download_thread(
+            file_size,
+            download_url,
+            tx,
+            client,
+            config.retry.clone(),
+        ));
         Self {
             current_pos: 0,
             buffer: None,
@@ -232,28 +257,53 @@ impl FileStreamState {
 }
 
 async fn download_thread(
+    file_size: u64,
     download_url: String,
     mut tx: mpsc::Sender<Bytes>,
     client: reqwest::Client,
-) {
-    let mut resp = match client
-        .get(&download_url)
-        .send()
-        .await
-        .and_then(|resp| resp.error_for_status())
-    {
-        Ok(resp) => resp,
-        Err(err) => {
-            log::error!("Failed to download file: {}", err);
-            return;
-        }
-    };
+    retry: RetryConfig,
+) -> std::result::Result<(), ()> {
+    let mut pos = 0u64;
 
-    while let Some(chunk) = resp.chunk().await.ok().flatten() {
-        if tx.send(chunk).await.is_err() {
-            return;
+    while pos < file_size {
+        let mut tries = 0;
+        let mut resp = loop {
+            let ret: anyhow::Result<_> = client
+                .get(&download_url)
+                .header(header::RANGE, format!("bytes={}-", pos))
+                .send()
+                .await
+                .map_err(|err| err.into())
+                .and_then(|resp| {
+                    if resp.status() != StatusCode::PARTIAL_CONTENT {
+                        anyhow::bail!("Not Partial Content response: {}", resp.status());
+                    }
+                    Ok(resp)
+                });
+            match ret {
+                Ok(resp) => break resp,
+                Err(err) => {
+                    tries += 1;
+                    log::error!(
+                        "Error downloading file (try {}/{}): {}",
+                        tries,
+                        retry.download_max_retry,
+                        err,
+                    );
+                    if retry.download_max_retry < tries {
+                        return Err(());
+                    }
+                    tokio::time::delay_for(retry.download_retry_delay).await;
+                }
+            }
+        };
+
+        while let Some(chunk) = resp.chunk().await.ok().flatten() {
+            pos += chunk.len() as u64;
+            tx.send(chunk).await.map_err(|_| ())?;
         }
     }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -261,19 +311,22 @@ struct DiskCache {
     dir: PathBuf,
     total_size: Arc<AtomicU64>,
     cache: SyncMutex<LruCache<ItemId, Arc<FileCacheState>>>,
-    config: DiskCacheConfig,
+    config: Config,
 }
 
 impl DiskCache {
-    fn new(config: DiskCacheConfig) -> io::Result<Self> {
-        assert!(config.max_cached_file_size <= config.max_total_size);
-        let dir = config.path.clone();
+    fn new(config: Config) -> io::Result<Self> {
+        let disk_config = &config.disk_cache;
+        assert!(disk_config.enable);
+        assert!(disk_config.max_cached_file_size <= disk_config.max_total_size);
+
+        let dir = disk_config.path.clone();
         std::fs::create_dir_all(&dir)?;
         log::debug!("Enabled file cache at: {}", dir.display());
         Ok(Self {
             dir,
             total_size: Arc::new(0.into()),
-            cache: SyncMutex::new(LruCache::new(config.max_files)),
+            cache: SyncMutex::new(LruCache::new(disk_config.max_files)),
             config,
         })
     }
@@ -289,7 +342,7 @@ impl DiskCache {
         download_url: &str,
         client: &reqwest::Client,
     ) -> io::Result<Option<Arc<FileCacheState>>> {
-        if self.config.max_cached_file_size < file_size {
+        if self.config.disk_cache.max_cached_file_size < file_size {
             return Ok(None);
         }
 
@@ -299,7 +352,8 @@ impl DiskCache {
         }
 
         // Drop LRU until we have enough space.
-        while self.config.max_cached_file_size < self.total_size.load(Ordering::Relaxed) + file_size
+        while self.config.disk_cache.max_cached_file_size
+            < self.total_size.load(Ordering::Relaxed) + file_size
         {
             if cache.remove_lru().is_none() {
                 // Cache is already empty.
@@ -315,6 +369,7 @@ impl DiskCache {
             cache_file.into(),
             &self.total_size,
             client.clone(),
+            self.config.retry.clone(),
         );
         cache.insert(item_id.clone(), state.clone());
         Ok(Some(state))
@@ -336,6 +391,7 @@ impl FileCacheState {
         cache_file: tokio::fs::File,
         cache_total_size: &Arc<AtomicU64>,
         client: reqwest::Client,
+        retry: RetryConfig,
     ) -> Arc<Self> {
         let (pos_tx, pos_rx) = watch::channel(0);
         let state = Arc::new(Self {
@@ -349,7 +405,13 @@ impl FileCacheState {
         // The channel size doesn't really matter, since it's just for synchronization
         // between downloading and writing.
         let (chunk_tx, chunk_rx) = mpsc::channel(64);
-        tokio::spawn(download_thread(download_url, chunk_tx, client));
+        tokio::spawn(download_thread(
+            file_size,
+            download_url,
+            chunk_tx,
+            client,
+            retry,
+        ));
         tokio::spawn(Self::write_to_cache_thread(
             Arc::downgrade(&state),
             chunk_rx,
