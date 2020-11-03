@@ -81,10 +81,12 @@ impl Vfs {
             tracker::Event::Clear => {
                 log::debug!("Clear all cache");
                 this.dir_pool.clear_cache();
+                this.file_pool.clear_cache();
                 this.inode_pool.clear_cache();
             }
             tracker::Event::Update(items) => {
                 this.dir_pool.sync_items(&items);
+                this.file_pool.sync_items(&items);
                 this.inode_pool.sync_items(&items);
             }
         }

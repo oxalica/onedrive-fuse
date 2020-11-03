@@ -4,7 +4,7 @@ use crate::{
 };
 use bytes::Bytes;
 use lru_cache::LruCache;
-use onedrive_api::{ItemId, ItemLocation, OneDrive};
+use onedrive_api::{resource::DriveItem, ItemId, ItemLocation, OneDrive};
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
 use sharded_slab::Slab;
@@ -146,6 +146,25 @@ impl FilePool {
             .ok_or(Error::InvalidHandle(fh))?
             .clone();
         file.read(offset, size).await
+    }
+
+    pub fn clear_cache(&self) {
+        // Opened handles are using download_url as snapshot, which are not affected.
+        if let Some(cache) = &self.disk_cache {
+            cache.clear();
+        }
+    }
+
+    pub fn sync_items(&self, items: &[DriveItem]) {
+        // Opened handles are using download_url as snapshot, which are not affected.
+        if let Some(cache) = &self.disk_cache {
+            cache.invalidate(
+                items
+                    .iter()
+                    .filter(|item| item.folder.is_none())
+                    .map(|item| item.id.as_ref().unwrap()),
+            );
+        }
     }
 }
 
@@ -373,6 +392,17 @@ impl DiskCache {
         );
         cache.insert(item_id.clone(), state.clone());
         Ok(Some(state))
+    }
+
+    fn clear(&self) {
+        self.cache.lock().unwrap().clear();
+    }
+
+    fn invalidate<'a>(&self, item_ids: impl IntoIterator<Item = &'a ItemId>) {
+        let mut cache = self.cache.lock().unwrap();
+        for item_id in item_ids {
+            cache.remove(item_id);
+        }
     }
 }
 
