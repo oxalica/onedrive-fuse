@@ -309,7 +309,7 @@ impl InodePool {
     }
 }
 
-fn cvt_filename<'a>(name: &'a OsStr) -> Result<&'a FileName> {
+fn cvt_filename(name: &OsStr) -> Result<&FileName> {
     name.to_str()
         .and_then(FileName::new)
         .ok_or_else(|| Error::InvalidFileName(name.to_owned()))

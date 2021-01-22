@@ -2,7 +2,7 @@ use crate::{config::de_duration_sec, login::ManagedOnedrive, vfs::inode::InodeAt
 use onedrive_api::{
     option::CollectionOption,
     resource::{DriveItem, DriveItemField},
-    ItemLocation, OneDrive,
+    OneDrive,
 };
 use serde::Deserialize;
 use std::{
@@ -132,8 +132,7 @@ async fn get_delta_url_with_option(
 ) -> onedrive_api::Result<String> {
     // FIXME: Pass options from vfs.
     Ok(onedrive
-        .get_latest_delta_url_with_option(
-            ItemLocation::root(),
+        .get_root_latest_delta_url_with_option(
             CollectionOption::new()
                 .page_size(config.fetch_page_size.into())
                 .select(&[
@@ -159,7 +158,9 @@ async fn sync_changes(
 ) -> onedrive_api::Result<bool> {
     log::trace!("Fetching and synchronizing changes...");
 
-    let mut fetcher = onedrive.track_changes_from_delta_url(&delta_url).await?;
+    let mut fetcher = onedrive
+        .track_root_changes_from_delta_url(&delta_url)
+        .await?;
 
     let mut total_changes = 0;
     while let Some(changes) = fetcher.fetch_next_page(&onedrive).await? {

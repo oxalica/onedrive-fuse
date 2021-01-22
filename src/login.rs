@@ -88,7 +88,7 @@ impl ManagedOnedrive {
         );
 
         loop {
-            tokio::time::delay_for(config.check_period).await;
+            tokio::time::sleep(config.check_period).await;
             if SystemTime::now() < relogin_inst {
                 continue;
             }

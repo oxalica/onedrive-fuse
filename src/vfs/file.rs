@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{mpsc, watch, Mutex},
 };
 
@@ -278,7 +278,7 @@ impl FileStreamState {
 async fn download_thread(
     file_size: u64,
     download_url: String,
-    mut tx: mpsc::Sender<Bytes>,
+    tx: mpsc::Sender<Bytes>,
     client: reqwest::Client,
     retry: RetryConfig,
 ) -> std::result::Result<(), ()> {
@@ -312,7 +312,7 @@ async fn download_thread(
                     if retry.download_max_retry < tries {
                         return Err(());
                     }
-                    tokio::time::delay_for(retry.download_retry_delay).await;
+                    tokio::time::sleep(retry.download_retry_delay).await;
                 }
             }
         };
@@ -469,7 +469,7 @@ impl FileCacheState {
 
             pos += chunk.len() as u64;
             // We are holding `state`.
-            pos_tx.broadcast(pos).unwrap();
+            pos_tx.send(pos).unwrap();
         }
         Ok(())
     }
@@ -480,11 +480,11 @@ impl FileCacheState {
         // Wait until our bytes are available.
         if *self.available_size.borrow() < end {
             let mut rx = self.available_size.clone();
-            while rx.recv().await.map_or(false, |pos| pos < end) {}
-            let pos = *rx.borrow();
-            if pos < end {
+            while rx.changed().await.is_ok() && *rx.borrow() < end {}
+            let available = *rx.borrow();
+            if available < end {
                 return Err(Error::UnexpectedEndOfDownload {
-                    current_pos: pos,
+                    current_pos: available,
                     file_size: self.file_size,
                 });
             }
