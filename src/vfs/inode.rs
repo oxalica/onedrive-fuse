@@ -7,6 +7,7 @@ use onedrive_api::{
     resource::{DriveItem, DriveItemField},
     FileName, ItemId, ItemLocation, OneDrive,
 };
+use reqwest::StatusCode;
 use serde::Deserialize;
 use std::{
     collections::hash_map::{Entry, HashMap},
@@ -189,29 +190,38 @@ impl InodePool {
         log::debug!("lookup: cache miss for: {}", child_name.as_str());
 
         // Fetch.
-        let item = onedrive
+        match onedrive
             .get_item_with_option(
                 ItemLocation::child_of_id(&parent_item_id, child_name),
                 ObjectOption::new()
                     .select(&[DriveItemField::id, DriveItemField::name])
                     .select(InodeAttr::ATTR_SELECT_FIELDS),
             )
-            .await?
-            .expect("No If-None-Match");
-        let attr = InodeAttr::parse_item(&item).unwrap();
-        let item_id = item.id.unwrap();
+            .await
+        {
+            Ok(item) => {
+                let item = item.expect("No If-None-Match");
+                let attr = InodeAttr::parse_item(&item).unwrap();
+                let item_id = item.id.unwrap();
 
-        dir_pool.touch(
-            parent_item_id,
-            dir::DirEntry {
-                name: item.name.unwrap(),
-                item_id: item_id.clone(),
-                attr: attr.clone(),
-            },
-        );
+                dir_pool.cache_child(
+                    parent_item_id,
+                    Ok(dir::DirEntry {
+                        name: item.name.unwrap(),
+                        item_id: item_id.clone(),
+                        attr: attr.clone(),
+                    }),
+                );
 
-        let ino = self.acquire_or_alloc(&item_id);
-        Ok((ino, attr))
+                let ino = self.acquire_or_alloc(&item_id);
+                Ok((ino, attr))
+            }
+            Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
+                dir_pool.cache_child(parent_item_id, Err(child_name.as_str().to_owned()));
+                Err(err.into())
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Decrease reference count of an inode by `count`.
@@ -256,13 +266,13 @@ impl InodePool {
 
         match InodeAttr::parse_parent_id(&item) {
             Some(parent_id) => {
-                dir_pool.touch(
+                dir_pool.cache_child(
                     parent_id,
-                    dir::DirEntry {
+                    Ok(dir::DirEntry {
                         name: item.name.unwrap(),
                         item_id,
                         attr: attr.clone(),
-                    },
+                    }),
                 );
             }
             // Root directory.

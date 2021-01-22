@@ -6,7 +6,11 @@ use onedrive_api::{
     ItemId, ItemLocation, OneDrive,
 };
 use serde::Deserialize;
-use std::{collections::HashMap, convert::TryFrom as _, sync::Mutex as SyncMutex};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryFrom as _,
+    sync::Mutex as SyncMutex,
+};
 
 #[derive(Debug, Clone)]
 pub struct DirEntry {
@@ -84,6 +88,7 @@ struct DirContent {
     entries: Vec<DirEntry>,
     /// name -> index of `entries`
     name_map: HashMap<String, usize>,
+    not_found_cache: HashSet<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,6 +109,7 @@ impl DirContent {
             state,
             entries,
             name_map,
+            not_found_cache: Default::default(),
         }
     }
 
@@ -222,29 +228,41 @@ impl DirPool {
         let dir = cache.lru.get_mut(parent_id)?;
         match dir.lookup(name).cloned() {
             Some(ent) => Some(Some(ent)),
-            None if dir.state == DirState::Full => Some(None),
+            None if dir.state == DirState::Full || dir.not_found_cache.contains(name) => Some(None),
             None => None,
         }
     }
 
-    /// Cache a child of a directory if not cached.
-    pub fn touch(&self, parent_id: ItemId, entry: DirEntry) {
+    /// Cache a child or mark a child as non-existent, of a directory if not cached.
+    pub fn cache_child(&self, parent_id: ItemId, child: std::result::Result<DirEntry, String>) {
         let mut cache = self.cache.lock().unwrap();
         let cache = &mut *cache;
         match cache.lru.get_mut(&parent_id) {
             Some(dir) => match dir.state {
                 DirState::Full => {}
-                DirState::Partial => {
-                    // Only insert if not already cached.
-                    if cache.parent_map.get_mut(&entry.item_id).is_none() {
-                        dir.insert(entry, parent_id, &mut cache.parent_map);
+                DirState::Partial => match child {
+                    Ok(entry) => {
+                        // Only insert if not already cached.
+                        if cache.parent_map.get_mut(&entry.item_id).is_none() {
+                            dir.insert(entry, parent_id, &mut cache.parent_map);
+                        }
                     }
+                    Err(name) => {
+                        dir.not_found_cache.insert(name);
+                    }
+                },
+            },
+            None => match child {
+                Ok(entry) => {
+                    let dir = DirContent::new(DirState::Partial, std::iter::once(entry));
+                    cache.insert(parent_id, dir);
+                }
+                Err(name) => {
+                    let mut dir = DirContent::new(DirState::Partial, std::iter::empty());
+                    dir.not_found_cache.insert(name);
+                    cache.insert(parent_id, dir);
                 }
             },
-            None => {
-                let dir = DirContent::new(DirState::Partial, std::iter::once(entry));
-                cache.insert(parent_id, dir);
-            }
         }
     }
 
