@@ -8,6 +8,8 @@ pub enum Error {
     // User errors.
     #[error("Object not found")]
     NotFound,
+    #[error("Not a directory")]
+    NotADirectory,
     #[error("Invalid file name: {}", .0.to_string_lossy())]
     InvalidFileName(OsString),
 
@@ -52,6 +54,7 @@ impl Error {
         match &self {
             // User errors.
             Self::NotFound => libc::ENOENT,
+            Self::NotADirectory => libc::ENOTDIR,
             Self::InvalidFileName(_) => {
                 log::info!("{}", self);
                 libc::EINVAL

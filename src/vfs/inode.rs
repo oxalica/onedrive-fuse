@@ -1,23 +1,19 @@
-use crate::vfs::{
-    dir,
-    error::{Error, Result},
-};
+//! Directory hierarachy and item attributes.
+use crate::vfs::error::{Error, Result};
+use indexmap::IndexMap;
+use lru_cache::LruCache;
 use onedrive_api::{
-    option::ObjectOption,
+    option::{CollectionOption, ObjectOption},
     resource::{DriveItem, DriveItemField},
-    FileName, ItemId, ItemLocation, OneDrive,
+    ItemId, ItemLocation, OneDrive,
 };
-use reqwest::StatusCode;
 use serde::Deserialize;
 use std::{
-    collections::hash_map::{Entry, HashMap},
-    ffi::OsStr,
-    sync::Mutex as SyncMutex,
+    sync::{Arc, Mutex as SyncMutex, Weak},
     time::SystemTime,
 };
-
-#[derive(Debug, Deserialize)]
-pub struct Config {}
+use tokio::sync::{Mutex, RwLock};
+use weak_table::WeakKeyHashMap;
 
 #[derive(Debug, Clone)]
 pub struct InodeAttr {
@@ -28,7 +24,7 @@ pub struct InodeAttr {
 }
 
 impl InodeAttr {
-    pub const ATTR_SELECT_FIELDS: &'static [DriveItemField] = &[
+    pub const SELECT_FIELDS: &'static [DriveItemField] = &[
         DriveItemField::size,
         DriveItemField::last_modified_date_time,
         DriveItemField::created_date_time,
@@ -47,270 +43,368 @@ impl InodeAttr {
             is_directory: item.folder.is_some(),
         })
     }
-
-    pub fn parse_parent_id(item: &DriveItem) -> Option<ItemId> {
-        // https://docs.microsoft.com/en-us/graph/api/resources/itemreference?view=graph-rest-1.0
-        let id = item.parent_reference.as_ref()?.get("id")?.as_str()?;
-        Some(ItemId(id.to_owned()))
-    }
 }
 
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub item_id: ItemId,
+    pub name: String,
+    pub attr: InodeAttr,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    lru_cache_size: usize,
+}
+
+// Lock order: field order.
 pub struct InodePool {
-    alive: SyncMutex<AliveInodePool>,
-    root_attr: SyncMutex<Option<InodeAttr>>,
+    // Any fetching requires a read permit, while a sync call requires a write permit.
+    // It is used for avoid race between fetching and delta response on the same item.
+    fetch_guard: RwLock<()>,
+    meta_map: SyncMutex<LruCache<ItemId, ItemMetaSlot>>,
+    // Item id -> (parent id, index of children).
+    parent_map: SyncMutex<WeakKeyHashMap<Weak<str>, (ItemId, usize)>>,
+    config: Config,
 }
 
-struct AliveInodePool {
-    inode_counter: u64,
-    /// ino -> (reference_count, item_id)
-    map: HashMap<u64, (u64, ItemId)>,
-    /// item_id -> ino
-    rev_map: HashMap<ItemId, u64>,
+type ItemMetaSlot = Arc<Mutex<Option<ItemMeta>>>;
+
+#[derive(Debug)]
+struct ItemMeta {
+    attr: InodeAttr,
+    // Can only be `Some` for directories.
+    children: Mutex<Option<DirChildren>>,
 }
 
-impl AliveInodePool {
-    fn new(init_inode: u64) -> Self {
+// Name -> item id.
+type DirChildren = IndexMap<String, Arc<str>>;
+
+impl InodePool {
+    pub fn new(config: Config) -> Self {
         Self {
-            inode_counter: init_inode,
-            map: Default::default(),
-            rev_map: Default::default(),
+            fetch_guard: RwLock::new(()),
+            meta_map: SyncMutex::new(LruCache::new(config.lru_cache_size)),
+            parent_map: SyncMutex::new(WeakKeyHashMap::new()),
+            config,
         }
     }
 
-    /// Get the item_id by inode id.
-    fn get(&self, ino: u64) -> Result<ItemId> {
-        self.map
-            .get(&ino)
-            .map(|(_, item_id)| item_id.clone())
-            .ok_or(Error::InvalidInode(ino))
+    fn get_or_new_meta_slot(&self, item_id: &ItemId) -> ItemMetaSlot {
+        let mut map = self.meta_map.lock().unwrap();
+        match map.get_mut(item_id) {
+            Some(slot) => slot.clone(),
+            None => {
+                let slot = Arc::new(Mutex::new(None));
+                map.insert(item_id.clone(), slot.clone());
+                slot
+            }
+        }
     }
 
-    /// Get inode id by item_id.
-    fn get_ino(&self, item_id: &ItemId) -> Option<u64> {
-        self.rev_map.get(item_id).copied()
-    }
+    /// Get item meta from cache, or fetch and cache them.
+    /// It fetch item attribute and children attributes (for directories) together if possible.
+    async fn get_or_fetch_attr(
+        &self,
+        item_id: &ItemId,
+        onedrive: &OneDrive,
+    ) -> Result<ItemMetaSlot> {
+        let meta_slot = self.get_or_new_meta_slot(item_id);
 
-    /// Find an inode id by `item_id` and increase its reference count.
-    fn acquire_ino(&mut self, item_id: &ItemId) -> Option<u64> {
-        let ino = self.get_ino(item_id)?;
-        self.map.get_mut(&ino).unwrap().0 += 1;
-        Some(ino)
-    }
+        // Lock the meta slot during the fetch to prevent multiple identical requests.
+        let mut meta_guard = meta_slot.lock().await;
+        if meta_guard.is_some() {
+            drop(meta_guard);
+            return Ok(meta_slot);
+        }
 
-    /// Allocate a new inode with 1 reference count and return the inode id.
-    fn alloc(&mut self, item_id: ItemId) -> u64 {
-        let ino = self.inode_counter;
-        self.inode_counter += 1;
-        assert!(self.rev_map.insert(item_id.clone(), ino).is_none());
-        assert!(self.map.insert(ino, (1, item_id)).is_none());
-        ino
-    }
+        log::trace!("Fetching attribute of {:?}", item_id);
 
-    /// Decrease reference count by `count` and optionally remove the entry.
-    /// Return the node if it is removed.
-    fn free(&mut self, ino: u64, count: u64) -> Result<Option<ItemId>> {
-        match self.map.entry(ino) {
-            Entry::Vacant(_) => Err(Error::InvalidInode(ino)),
-            Entry::Occupied(mut ent) => {
-                assert!(count <= ent.get_mut().0);
-                if ent.get_mut().0 == count {
-                    let (_, item_id) = ent.remove();
-                    assert!(self.rev_map.remove(&item_id).is_some());
-                    Ok(Some(item_id))
+        let children_fields = InodeAttr::SELECT_FIELDS
+            .iter()
+            .chain(&[
+                DriveItemField::id,
+                DriveItemField::name,
+                DriveItemField::folder,
+            ])
+            .map(|field| field.raw_name())
+            .collect::<Vec<_>>();
+        let opt = ObjectOption::new()
+            .select(&[
+                // `id` is required, or we'll get 400 Bad Request.
+                DriveItemField::id,
+                DriveItemField::children,
+            ])
+            .select(InodeAttr::SELECT_FIELDS)
+            .expand(DriveItemField::children, Some(&children_fields));
+        let item = onedrive
+            .get_item_with_option(ItemLocation::from_id(item_id), opt)
+            .await?
+            .expect("No If-None-Match");
+        let attr = InodeAttr::parse_item(&item).expect("Invalid attrs");
+
+        let children = {
+            if !attr.is_directory {
+                Mutex::new(None)
+            } else {
+                let children_count = (|| item.folder.as_ref()?.get("childCount")?.as_u64())()
+                    .expect("Missing folder.childCount");
+                let children = item.children.expect("Missing children field");
+                // FIXME: got length == childCount - 1 for root directory.
+                if children.len() as u64 == children_count
+                    && children.len() < self.config.lru_cache_size
+                {
+                    Mutex::new(Some(self.cache_children(item_id, children).await))
                 } else {
-                    ent.get_mut().0 -= count;
-                    Ok(None)
+                    log::debug!(
+                        "Too many children of {:?}, total={}, got={}, cache_size={}",
+                        item_id,
+                        children_count,
+                        children.len(),
+                        self.config.lru_cache_size
+                    );
+                    // FIXME: A single request cannot get all children.
+                    // Maybe save as partial result?
+                    Mutex::new(None)
+                }
+            }
+        };
+
+        *meta_guard = Some(ItemMeta { attr, children });
+        drop(meta_guard);
+        Ok(meta_slot)
+    }
+
+    async fn get_or_fetch_children(
+        &self,
+        item_id: &ItemId,
+        onedrive: &OneDrive,
+    ) -> Result<ItemMetaSlot> {
+        let meta_slot = self.get_or_fetch_attr(item_id, onedrive).await?;
+        let meta_guard = meta_slot.lock().await;
+        let meta = meta_guard.as_ref().expect("Already populated");
+        if !meta.attr.is_directory {
+            return Err(Error::NotADirectory);
+        }
+
+        let mut children = meta.children.lock().await;
+        if children.is_some() {
+            drop(children);
+            drop(meta_guard);
+            return Ok(meta_slot);
+        }
+
+        log::trace!("Fetching children of {:?}", item_id);
+
+        // TODO: Incremental fetch?
+        let ret_children = onedrive
+            .list_children_with_option(
+                ItemLocation::from_id(item_id),
+                CollectionOption::new()
+                    .select(&[DriveItemField::id, DriveItemField::name])
+                    .select(InodeAttr::SELECT_FIELDS),
+            )
+            .await?
+            .expect("No If-None-Match")
+            .fetch_all(onedrive)
+            .await?;
+        let ret_children = self.cache_children(item_id, ret_children).await;
+
+        *children = Some(ret_children);
+
+        drop(children);
+        drop(meta_guard);
+        return Ok(meta_slot);
+    }
+
+    async fn cache_children(&self, item_id: &ItemId, children: Vec<DriveItem>) -> DirChildren {
+        log::trace!("Cache {} children of {:?}", children.len(), item_id);
+        let mut map = self.meta_map.lock().unwrap();
+        let mut parent_map = self.parent_map.lock().unwrap();
+
+        children
+            .into_iter()
+            .enumerate()
+            .map(|(child_idx, child_item)| {
+                let child_meta = ItemMeta {
+                    attr: InodeAttr::parse_item(&child_item).expect("Invalid attrs"),
+                    children: Mutex::new(None),
+                };
+                let child_name = child_item.name.expect("Missing name");
+                let child_id = child_item.id.expect("Missing id");
+                assert_ne!(&child_id, item_id, "No cycle");
+                // Cache child meta.
+                map.insert(child_id.clone(), Arc::new(Mutex::new(Some(child_meta))));
+
+                // Register parent reference.
+                let child_id: Arc<str> = child_id.0.into();
+                parent_map.insert(child_id.clone(), (item_id.clone(), child_idx));
+                (child_name, child_id)
+            })
+            .collect()
+    }
+
+    /// Get attribute of an item.
+    pub async fn get_attr(&self, item_id: &ItemId, onedrive: &OneDrive) -> Result<InodeAttr> {
+        let _guard = self.fetch_guard.read().await;
+        Ok(self
+            .get_or_fetch_attr(item_id, onedrive)
+            .await?
+            .lock()
+            .await
+            .as_ref()
+            .expect("Already populated")
+            .attr
+            .clone())
+    }
+
+    /// Lookup a child by name of an directory item.
+    pub async fn lookup(
+        &self,
+        parent_id: &ItemId,
+        child_name: &str,
+        onedrive: &OneDrive,
+    ) -> Result<ItemId> {
+        let _guard = self.fetch_guard.read().await;
+        let slot = self.get_or_fetch_children(parent_id, onedrive).await?;
+        let meta = slot.lock().await;
+        let children = meta
+            .as_ref()
+            .expect("Already populated")
+            .children
+            .lock()
+            .await;
+        let children = children.as_ref().expect("Already populated");
+        Ok(ItemId(String::from(
+            &**children.get(child_name).ok_or(Error::NotFound)?,
+        )))
+    }
+
+    /// Read entries of a directory.
+    pub async fn read_dir(
+        &self,
+        parent_id: &ItemId,
+        offset: u64,
+        count: usize,
+        onedrive: &OneDrive,
+    ) -> Result<Vec<DirEntry>> {
+        let _guard = self.fetch_guard.read().await;
+        let slot = self.get_or_fetch_children(parent_id, onedrive).await?;
+        let meta = slot.lock().await;
+        let children = meta
+            .as_ref()
+            .expect("Already populated")
+            .children
+            .lock()
+            .await;
+        let children = children.as_ref().expect("Already populated");
+
+        let mut entries = Vec::with_capacity(count);
+        let l = (offset as usize).min(children.len());
+        let r = (l + count).min(children.len());
+        for i in l..r {
+            let (name, id) = children.get_index(i).unwrap();
+            let item_id = ItemId(String::from(&**id));
+            assert_ne!(&item_id, parent_id, "No cycle");
+            let attr = self.get_attr(&item_id, onedrive).await?;
+            entries.push(DirEntry {
+                name: name.clone(),
+                item_id,
+                attr,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Clear all cache.
+    pub async fn clear_cache(&self) {
+        let _guard = self.fetch_guard.write().await;
+        self.meta_map.lock().unwrap().clear();
+        // Parent map will be automatically clear since it's a weak map.
+    }
+
+    /// Sync item changes from remote. Items not in cache are skipped.
+    pub async fn sync_items(&self, updated: &[DriveItem]) {
+        let _guard = self.fetch_guard.write().await;
+        let mut map = self.meta_map.lock().unwrap();
+        let mut parent_map = self.parent_map.lock().unwrap();
+
+        for item in updated {
+            let item_id = item.id.as_ref().unwrap();
+
+            // 1. Handle attribute update.
+            let new_attr = InodeAttr::parse_item(&item).unwrap();
+            if let Some(meta) = map.get_mut(item_id) {
+                if let Some(meta) = &mut *meta.try_lock().expect("Fetch guard is held") {
+                    meta.attr = new_attr;
+                }
+            }
+
+            // 2. Root directory cannot be moved or renamed. Skip.
+            if item.root.is_some() {
+                continue;
+            }
+
+            let new_parent_id = (|| {
+                let id = item.parent_reference.as_ref()?.get("id")?.as_str()?;
+                Some(ItemId(id.to_owned()))
+            })()
+            .expect("Missing new parent for non-root item");
+            let new_name = item.name.clone().expect("Missing name field");
+
+            // 3. If the item is cached in some directory.
+            if let Some((old_parent_id, old_idx)) = parent_map.get(&*item_id.0).cloned() {
+                let parent_meta = map
+                    .get_mut(&old_parent_id)
+                    .expect("Parent reference lives")
+                    .try_lock()
+                    .expect("Fetch guard is held");
+                let parent_meta = parent_meta.as_ref().expect("Parent reference lives");
+                let mut parent_children = parent_meta
+                    .children
+                    .try_lock()
+                    .expect("Fetch guard is held");
+                let parent_children = parent_children.as_mut().expect("Parent reference lives");
+
+                // 3.1. Do nothing if neither parent or name is modified.
+                if old_parent_id == new_parent_id
+                    && parent_children.get_index(old_idx).unwrap().0 == &new_name
+                {
+                    continue;
+                }
+
+                // 3.2. Remove the old entry.
+                log::debug!(
+                    "Remove {:?} from cached directory {:?}",
+                    item_id,
+                    old_parent_id,
+                );
+                if old_idx + 1 != parent_children.len() {
+                    // Maintain reverse reference of the last entry to be swapped.
+                    parent_map[&*parent_children.last().unwrap().1].1 = old_idx;
+                }
+                parent_children.swap_remove_index(old_idx);
+            }
+
+            // 4. If the new parent directory is cached.
+            if let Some(meta) = map.get_mut(&new_parent_id) {
+                if let Some(meta) = &*meta.try_lock().expect("Fetch guard is held") {
+                    if let Some(children) =
+                        &mut *meta.children.try_lock().expect("Fetch guard is held")
+                    {
+                        // 4.1. Add a new entry.
+                        log::debug!(
+                            "Add {:?} into cached directory {:?}",
+                            item_id,
+                            new_parent_id,
+                        );
+                        let id: Arc<str> = (&*item_id.0).into();
+                        let child_idx = children.len();
+                        children.insert(new_name, id.clone());
+                        parent_map.insert(id, (new_parent_id, child_idx));
+                    }
                 }
             }
         }
     }
-}
-
-impl InodePool {
-    const ROOT_ID: u64 = fuse::FUSE_ROOT_ID;
-
-    /// Initialize inode pool with root id to make operation on root nothing special.
-    pub async fn new(_config: Config, onedrive: &OneDrive) -> anyhow::Result<Self> {
-        // Should be small.
-        static_assertions::const_assert_eq!(InodePool::ROOT_ID, 1);
-
-        let root_item = onedrive
-            .get_item_with_option(
-                ItemLocation::root(),
-                ObjectOption::new()
-                    .select(&[DriveItemField::id])
-                    .select(InodeAttr::ATTR_SELECT_FIELDS),
-            )
-            .await?
-            .expect("No If-None-Match");
-        let root_attr = InodeAttr::parse_item(&root_item).unwrap();
-
-        let mut alive = AliveInodePool::new(Self::ROOT_ID);
-        // Never freed.
-        alive.alloc(root_item.id.unwrap());
-
-        Ok(Self {
-            alive: SyncMutex::new(alive),
-            root_attr: SyncMutex::new(Some(root_attr)),
-        })
-    }
-
-    /// Update InodeAttr of existing inode or allocate a new inode,
-    /// also increase the reference count.
-    fn acquire_or_alloc(&self, item_id: &ItemId) -> u64 {
-        let mut alive = self.alive.lock().unwrap();
-        match alive.acquire_ino(item_id) {
-            Some(ino) => ino,
-            None => alive.alloc(item_id.clone()),
-        }
-    }
-
-    pub async fn lookup(
-        &self,
-        parent_ino: u64,
-        child_name: &OsStr,
-        dir_pool: &dir::DirPool,
-        onedrive: &OneDrive,
-    ) -> Result<(u64, InodeAttr)> {
-        let parent_item_id = self.get_item_id(parent_ino)?;
-        let child_name = cvt_filename(child_name)?;
-
-        match dir_pool.lookup_cache(&parent_item_id, child_name.as_str()) {
-            // Cache hit and item is not found.
-            Some(None) => return Err(Error::NotFound),
-            // Cache hit and item is found.
-            Some(Some(ent)) => {
-                let ino = self.acquire_or_alloc(&ent.item_id);
-                return Ok((ino, ent.attr));
-            }
-            // Cache miss.
-            None => {}
-        }
-
-        log::debug!("lookup: cache miss for: {}", child_name.as_str());
-
-        // Fetch.
-        match onedrive
-            .get_item_with_option(
-                ItemLocation::child_of_id(&parent_item_id, child_name),
-                ObjectOption::new()
-                    .select(&[DriveItemField::id, DriveItemField::name])
-                    .select(InodeAttr::ATTR_SELECT_FIELDS),
-            )
-            .await
-        {
-            Ok(item) => {
-                let item = item.expect("No If-None-Match");
-                let attr = InodeAttr::parse_item(&item).unwrap();
-                let item_id = item.id.unwrap();
-
-                dir_pool.cache_child(
-                    parent_item_id,
-                    Ok(dir::DirEntry {
-                        name: item.name.unwrap(),
-                        item_id: item_id.clone(),
-                        attr: attr.clone(),
-                    }),
-                );
-
-                let ino = self.acquire_or_alloc(&item_id);
-                Ok((ino, attr))
-            }
-            Err(err) if err.status_code() == Some(StatusCode::NOT_FOUND) => {
-                dir_pool.cache_child(parent_item_id, Err(child_name.as_str().to_owned()));
-                Err(err.into())
-            }
-            Err(err) => Err(err.into()),
-        }
-    }
-
-    /// Decrease reference count of an inode by `count`.
-    /// Return if it is freed.
-    pub async fn free(&self, ino: u64, count: u64) -> Result<bool> {
-        let mut alive = self.alive.lock().unwrap();
-        Ok(alive.free(ino, count)?.is_some())
-    }
-
-    /// Get InodeAttr of an existing inode.
-    pub async fn get_attr(
-        &self,
-        ino: u64,
-        dir_pool: &dir::DirPool,
-        onedrive: &OneDrive,
-    ) -> Result<InodeAttr> {
-        let item_id = self.get_item_id(ino)?;
-        if ino == Self::ROOT_ID {
-            if let Some(attr) = &*self.root_attr.lock().unwrap() {
-                return Ok(attr.clone());
-            }
-        } else if let Some(attr) = dir_pool.get_item_attr_cache(&item_id) {
-            return Ok(attr);
-        }
-
-        log::debug!("get_attr: cache miss for {:?}", item_id);
-
-        let item = onedrive
-            .get_item_with_option(
-                ItemLocation::from_id(&item_id),
-                ObjectOption::new()
-                    .select(&[
-                        DriveItemField::name,
-                        DriveItemField::root,
-                        DriveItemField::parent_reference,
-                    ])
-                    .select(InodeAttr::ATTR_SELECT_FIELDS),
-            )
-            .await?
-            .expect("No If-None-Match");
-        let attr = InodeAttr::parse_item(&item).unwrap();
-
-        match InodeAttr::parse_parent_id(&item) {
-            Some(parent_id) => {
-                dir_pool.cache_child(
-                    parent_id,
-                    Ok(dir::DirEntry {
-                        name: item.name.unwrap(),
-                        item_id,
-                        attr: attr.clone(),
-                    }),
-                );
-            }
-            // Root directory.
-            None => {
-                assert_eq!(ino, Self::ROOT_ID);
-                *self.root_attr.lock().unwrap() = Some(attr.clone());
-            }
-        }
-
-        Ok(attr)
-    }
-
-    /// Get item id from an existing inode.
-    pub fn get_item_id(&self, ino: u64) -> Result<ItemId> {
-        Ok(self.alive.lock().unwrap().get(ino)?)
-    }
-
-    /// Clear all cache.
-    pub fn clear_cache(&self) {
-        *self.root_attr.lock().unwrap() = None;
-    }
-
-    /// Sync item changes from remote.
-    pub fn sync_items(&self, items: &[DriveItem]) {
-        // We only concern about the root item.
-        let mut root_attr = self.root_attr.lock().unwrap();
-        for item in items {
-            if item.root.is_some() {
-                assert!(item.deleted.is_none());
-                let attr = InodeAttr::parse_item(item).unwrap();
-                *root_attr = Some(attr);
-            }
-        }
-    }
-}
-
-fn cvt_filename(name: &OsStr) -> Result<&FileName> {
-    name.to_str()
-        .and_then(FileName::new)
-        .ok_or_else(|| Error::InvalidFileName(name.to_owned()))
 }

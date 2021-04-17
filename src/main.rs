@@ -1,5 +1,6 @@
 use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
+use fuse::FUSE_ROOT_ID;
 use onedrive_api::{Auth, Permission};
 use std::{env, io, path::PathBuf};
 use structopt::StructOpt;
@@ -101,7 +102,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     let config = config::Config::merge_from_default(opt.config.as_deref(), &opt.option)?;
 
     let onedrive = ManagedOnedrive::login(credential_path, config.relogin).await?;
-    let vfs = vfs::Vfs::new(config.vfs, onedrive.clone())
+    let vfs = vfs::Vfs::new(FUSE_ROOT_ID, config.vfs, onedrive.clone())
         .await
         .context("Failed to initialize vfs")?;
 

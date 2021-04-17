@@ -1,5 +1,5 @@
 use crate::login::ManagedOnedrive;
-use onedrive_api::OneDrive;
+use onedrive_api::{option::ObjectOption, resource::DriveItemField, ItemLocation, OneDrive};
 use reqwest::Client;
 use serde::Deserialize;
 use std::{
@@ -9,31 +9,29 @@ use std::{
     time::Duration,
 };
 
-mod dir;
 pub mod error;
 mod file;
 mod inode;
+mod inode_id;
 mod statfs;
 mod tracker;
 
-pub use dir::DirEntry;
 pub use error::{Error, Result};
-pub use inode::InodeAttr;
+pub use inode::{DirEntry, InodeAttr};
 pub use statfs::StatfsData;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
     statfs: statfs::Config,
-    inode: inode::Config,
-    dir: dir::Config,
+    dir: inode::Config,
     file: file::Config,
     tracker: tracker::Config,
 }
 
 pub struct Vfs {
     statfs: statfs::Statfs,
+    id_pool: inode_id::InodeIdPool,
     inode_pool: inode::InodePool,
-    dir_pool: dir::DirPool,
     file_pool: file::FilePool,
     tracker: tracker::Tracker,
     onedrive: ManagedOnedrive,
@@ -41,7 +39,11 @@ pub struct Vfs {
 }
 
 impl Vfs {
-    pub async fn new(config: Config, onedrive: ManagedOnedrive) -> anyhow::Result<Arc<Self>> {
+    pub async fn new(
+        root_ino: u64,
+        config: Config,
+        onedrive: ManagedOnedrive,
+    ) -> anyhow::Result<Arc<Self>> {
         // Initialize tracker before everything else.
         let this_referrer = Arc::new(SyncMutex::new(None));
         let this_referrer2 = this_referrer.clone();
@@ -52,11 +54,22 @@ impl Vfs {
         )
         .await?;
 
-        let inode_pool = inode::InodePool::new(config.inode, &*onedrive.get().await).await?;
+        let root_item_id = onedrive
+            .get()
+            .await
+            .get_item_with_option(
+                ItemLocation::root(),
+                ObjectOption::new().select(&[DriveItemField::id]),
+            )
+            .await?
+            .expect("No If-None-Match")
+            .id
+            .expect("Missing id field");
+
         let this = Arc::new(Self {
             statfs: statfs::Statfs::new(config.statfs),
-            inode_pool,
-            dir_pool: dir::DirPool::new(config.dir),
+            id_pool: inode_id::InodeIdPool::new(root_ino, root_item_id),
+            inode_pool: inode::InodePool::new(config.dir),
             file_pool: file::FilePool::new(config.file)?,
             tracker,
             onedrive,
@@ -80,14 +93,12 @@ impl Vfs {
         match event {
             tracker::Event::Clear => {
                 log::debug!("Clear all cache");
-                this.dir_pool.clear_cache();
+                this.inode_pool.clear_cache().await;
                 this.file_pool.clear_cache();
-                this.inode_pool.clear_cache();
             }
             tracker::Event::Update(items) => {
-                this.dir_pool.sync_items(&items);
+                this.inode_pool.sync_items(&items).await;
                 this.file_pool.sync_items(&items);
-                this.inode_pool.sync_items(&items);
             }
         }
     }
@@ -113,31 +124,34 @@ impl Vfs {
         parent_ino: u64,
         child_name: &OsStr,
     ) -> Result<(u64, InodeAttr, Duration)> {
-        let (ino, attr) = self
+        let parent_id = self.id_pool.get_item_id(parent_ino)?;
+        let child_name = cvt_filename(child_name)?;
+        let id = self
             .inode_pool
-            .lookup(
-                parent_ino,
-                child_name,
-                &self.dir_pool,
-                &*self.onedrive().await,
-            )
+            .lookup(&parent_id, child_name, &*self.onedrive().await)
             .await?;
-        log::trace!(target: "vfs::inode", "lookup: ino={} attr={:?}", ino, attr);
+        let attr = self
+            .inode_pool
+            .get_attr(&id, &*self.onedrive().await)
+            .await?;
+        let ino = self.id_pool.acquire_or_alloc(&id);
+        log::trace!(target: "vfs::inode", "lookup: id={:?} ino={} attr={:?}", id, ino, attr);
         Ok((ino, attr, self.ttl()))
     }
 
     pub async fn forget(&self, ino: u64, count: u64) -> Result<()> {
-        let freed = self.inode_pool.free(ino, count).await?;
+        let freed = self.id_pool.free(ino, count)?;
         log::trace!(target: "vfs::inode", "forget: ino={} count={} freed={}", ino, count, freed);
         Ok(())
     }
 
     pub async fn get_attr(&self, ino: u64) -> Result<(InodeAttr, Duration)> {
+        let id = self.id_pool.get_item_id(ino)?;
         let attr = self
             .inode_pool
-            .get_attr(ino, &self.dir_pool, &*self.onedrive().await)
+            .get_attr(&id, &*self.onedrive().await)
             .await?;
-        log::trace!(target: "vfs::inode", "get_attr: ino={} attr={:?}", ino, attr);
+        log::trace!(target: "vfs::inode", "get_attr: id={:?} ino={} attr={:?}", id, ino, attr);
         Ok((attr, self.ttl()))
     }
 
@@ -160,10 +174,10 @@ impl Vfs {
         offset: u64,
         count: usize,
     ) -> Result<impl AsRef<[DirEntry]>> {
-        let parent_id = self.inode_pool.get_item_id(ino)?;
+        let parent_id = self.id_pool.get_item_id(ino)?;
         let ret = self
-            .dir_pool
-            .read(&parent_id, offset, count, &*self.onedrive().await)
+            .inode_pool
+            .read_dir(&parent_id, offset, count, &*self.onedrive().await)
             .await?;
         log::trace!(target: "vfs::dir", "read_dir: ino={} offset={}", ino, offset);
         Ok(ret)
@@ -171,7 +185,7 @@ impl Vfs {
 
     // TODO: Flags.
     pub async fn open_file(&self, ino: u64) -> Result<u64> {
-        let item_id = self.inode_pool.get_item_id(ino)?;
+        let item_id = self.id_pool.get_item_id(ino)?;
         let fh = self
             .file_pool
             .open(&item_id, &*self.onedrive().await, &self.client)
@@ -205,4 +219,9 @@ impl Vfs {
         );
         Ok(ret)
     }
+}
+
+fn cvt_filename(name: &OsStr) -> Result<&str> {
+    name.to_str()
+        .ok_or_else(|| Error::InvalidFileName(name.to_owned()))
 }

@@ -1,7 +1,6 @@
 [package]
 name = "onedrive-fuse"
 version = "0.1.0"
-authors = ["oxalica <oxalicc@pm.me>"]
 edition = "2018"
 repository = "https://github.com/oxalica/onedrive-fuse"
 keywords = ["onedrive", "fuse"]
@@ -20,6 +19,7 @@ env_logger = "0.8.1"
 fuse = "0.3.1"
 http = "0.2.1"
 humantime = "2.0.1"
+indexmap = "1.6.2"
 libc = "0.2.69"
 log = "0.4.8"
 lru-cache = "0.1.2"
@@ -37,3 +37,4 @@ thiserror = "1.0.16"
 # For `fuse` compatibility
 time01 = { package = "time", version = "0.1" }
 tokio = { version = "1.0.2", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+weak-table = "0.3.0"

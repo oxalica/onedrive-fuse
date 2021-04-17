@@ -142,7 +142,7 @@ async fn get_delta_url_with_option(
                     DriveItemField::root,
                     DriveItemField::parent_reference,
                 ])
-                .select(InodeAttr::ATTR_SELECT_FIELDS),
+                .select(InodeAttr::SELECT_FIELDS),
         )
         .await?)
 }
