@@ -1,5 +1,7 @@
 use crate::login::ManagedOnedrive;
-use onedrive_api::{option::ObjectOption, resource::DriveItemField, ItemLocation, OneDrive};
+use onedrive_api::{
+    option::ObjectOption, resource::DriveItemField, FileName, ItemLocation, OneDrive,
+};
 use reqwest::Client;
 use serde::Deserialize;
 use std::{
@@ -116,6 +118,15 @@ impl Vfs {
         self.tracker.time_to_next_sync().unwrap_or(MAX_TTL)
     }
 
+    // Guard for write operation. Return error in readonly mode.
+    fn write_guard(&self) -> Result<()> {
+        if self.readonly {
+            Err(Error::AccessDenied)
+        } else {
+            Ok(())
+        }
+    }
+
     pub async fn statfs(&self) -> Result<(StatfsData, Duration)> {
         let (ret, ttl) = self.statfs.statfs(&*self.onedrive().await).await?;
         log::trace!(target: "vfs::statfs", "statfs: statfs={:?} ttl={:?}", ret, ttl);
@@ -222,9 +233,31 @@ impl Vfs {
         );
         Ok(ret)
     }
+
+    pub async fn create_dir(
+        &self,
+        parent_ino: u64,
+        name: &OsStr,
+    ) -> Result<(u64, InodeAttr, Duration)> {
+        self.write_guard()?;
+        let name = cvt_filename(name)?;
+        let parent_id = self.id_pool.get_item_id(parent_ino)?;
+        let (id, attr) = self
+            .inode_pool
+            .create_dir(&parent_id, name, &*self.onedrive().await)
+            .await?;
+        let ino = self.id_pool.acquire_or_alloc(&id);
+        log::trace!(
+            target: "vfs::dir",
+            "create_dir: parent_id={:?} parent_ino={} name={} id={:?} ino={}",
+            parent_id, parent_ino, name.as_str(), id, ino,
+        );
+        Ok((ino, attr, self.ttl()))
+    }
 }
 
-fn cvt_filename(name: &OsStr) -> Result<&str> {
+fn cvt_filename(name: &OsStr) -> Result<&FileName> {
     name.to_str()
+        .and_then(FileName::new)
         .ok_or_else(|| Error::InvalidFileName(name.to_owned()))
 }

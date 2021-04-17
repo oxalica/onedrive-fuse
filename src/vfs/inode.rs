@@ -3,9 +3,9 @@ use crate::vfs::error::{Error, Result};
 use indexmap::IndexMap;
 use lru_cache::LruCache;
 use onedrive_api::{
-    option::{CollectionOption, ObjectOption},
+    option::{CollectionOption, DriveItemPutOption, ObjectOption},
     resource::{DriveItem, DriveItemField},
-    ItemId, ItemLocation, OneDrive,
+    ConflictBehavior, FileName, ItemId, ItemLocation, OneDrive,
 };
 use serde::Deserialize;
 use std::{
@@ -262,7 +262,7 @@ impl InodePool {
     pub async fn lookup(
         &self,
         parent_id: &ItemId,
-        child_name: &str,
+        child_name: &FileName,
         onedrive: &OneDrive,
     ) -> Result<ItemId> {
         let _guard = self.fetch_guard.read().await;
@@ -276,7 +276,7 @@ impl InodePool {
             .await;
         let children = children.as_ref().expect("Already populated");
         Ok(ItemId(String::from(
-            &**children.get(child_name).ok_or(Error::NotFound)?,
+            &**children.get(child_name.as_str()).ok_or(Error::NotFound)?,
         )))
     }
 
@@ -314,6 +314,52 @@ impl InodePool {
             });
         }
         Ok(entries)
+    }
+
+    pub async fn create_dir(
+        &self,
+        parent_id: &ItemId,
+        name: &FileName,
+        onedrive: &OneDrive,
+    ) -> Result<(ItemId, InodeAttr)> {
+        let _guard = self.fetch_guard.read().await;
+
+        let item = onedrive
+            .create_folder_with_option(
+                ItemLocation::from_id(parent_id),
+                name,
+                DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Fail),
+            )
+            .await?;
+        let attr = InodeAttr::parse_item(&item).expect("Invalid attrs");
+        let id = item.id.expect("Missing id");
+
+        let parent_meta = {
+            // Cache the empty directory.
+            let mut map = self.meta_map.lock().unwrap();
+            let meta = ItemMeta {
+                attr: attr.clone(),
+                children: Mutex::new(Some(IndexMap::new())),
+            };
+            map.insert(id.clone(), Arc::new(Mutex::new(Some(meta))));
+
+            map.get_mut(parent_id).cloned()
+        };
+
+        // Add a new entry to the parent if cached.
+        if let Some(meta) = parent_meta {
+            if let Some(meta) = &*meta.lock().await {
+                if let Some(children) = &mut *meta.children.lock().await {
+                    let mut parent_map = self.parent_map.lock().unwrap();
+                    let id: Arc<str> = (&*id.0).into();
+                    let child_idx = children.len();
+                    children.insert(name.as_str().to_owned(), id.clone());
+                    parent_map.insert(id, (parent_id.clone(), child_idx));
+                }
+            }
+        }
+
+        Ok((id, attr))
     }
 
     /// Clear all cache.

@@ -31,7 +31,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] statfs
   - [ ] Write
     - [ ] create
-    - [ ] mkdir
+    - [x] mkdir
     - [ ] mknod
     - [ ] open
       - [ ] O_WRONLY

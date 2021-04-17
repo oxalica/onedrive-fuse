@@ -250,6 +250,20 @@ impl fuse::Filesystem for Filesystem {
             }
         });
     }
+
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, reply: ReplyEntry) {
+        let name = name.to_owned();
+        self.spawn(|inner| async move {
+            match inner.vfs.create_dir(parent, &name).await {
+                Ok((ino, attr, ttl)) => {
+                    let ttl = dur_to_timespec(ttl);
+                    let attr = inner.cvt_attr(ino, attr);
+                    reply.entry(&ttl, &attr, GENERATION)
+                }
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        })
+    }
 }
 
 fn to_blocks_ceil(bytes: u64) -> u64 {

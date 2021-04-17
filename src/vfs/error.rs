@@ -12,6 +12,10 @@ pub enum Error {
     NotADirectory,
     #[error("Invalid file name: {}", .0.to_string_lossy())]
     InvalidFileName(OsString),
+    #[error("File exists")]
+    FileExists,
+    #[error("Access denied")]
+    AccessDenied,
 
     // Api and network errors.
     #[error("Api error: {0}")]
@@ -43,7 +47,7 @@ impl From<onedrive_api::Error> for Error {
     fn from(err: onedrive_api::Error) -> Self {
         match err.status_code() {
             Some(StatusCode::NOT_FOUND) => Self::NotFound,
-            // TODO: Handle CONFLICT?
+            Some(StatusCode::CONFLICT) => Self::FileExists,
             _ => Self::ApiError(err),
         }
     }
@@ -55,6 +59,8 @@ impl Error {
             // User errors.
             Self::NotFound => libc::ENOENT,
             Self::NotADirectory => libc::ENOTDIR,
+            Self::FileExists => libc::EEXIST,
+            Self::AccessDenied => libc::EACCES,
             Self::InvalidFileName(_) => {
                 log::info!("{}", self);
                 libc::EINVAL
