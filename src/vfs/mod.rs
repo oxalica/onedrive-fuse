@@ -23,7 +23,7 @@ pub use statfs::StatfsData;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     statfs: statfs::Config,
-    dir: inode::Config,
+    inode: inode::Config,
     file: file::Config,
     tracker: tracker::Config,
 }
@@ -69,7 +69,7 @@ impl Vfs {
         let this = Arc::new(Self {
             statfs: statfs::Statfs::new(config.statfs),
             id_pool: inode_id::InodeIdPool::new(root_ino, root_item_id),
-            inode_pool: inode::InodePool::new(config.dir),
+            inode_pool: inode::InodePool::new(config.inode),
             file_pool: file::FilePool::new(config.file)?,
             tracker,
             onedrive,

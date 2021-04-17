@@ -50,10 +50,8 @@ max_changes = 2048
 cache_ttl = 300
 
 [vfs.inode]
-
-[vfs.dir]
-# Size of LRU cache for contents of directories.
-lru_cache_size = 4096
+# Size of LRU cache for metadata and content of directories.
+lru_cache_size = 1048576
 
 [vfs.file]
 # Max number of chunks the streaming download buffer holds.
