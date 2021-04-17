@@ -36,11 +36,13 @@ pub struct Vfs {
     tracker: tracker::Tracker,
     onedrive: ManagedOnedrive,
     client: Client,
+    readonly: bool,
 }
 
 impl Vfs {
     pub async fn new(
         root_ino: u64,
+        readonly: bool,
         config: Config,
         onedrive: ManagedOnedrive,
     ) -> anyhow::Result<Arc<Self>> {
@@ -74,6 +76,7 @@ impl Vfs {
             tracker,
             onedrive,
             client: Client::new(),
+            readonly,
         });
         *this_referrer.lock().unwrap() = Some(Arc::downgrade(&this));
         Ok(this)

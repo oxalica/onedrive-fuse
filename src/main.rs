@@ -38,7 +38,9 @@ async fn main_login(opt: OptLogin) -> Result<()> {
 
     let auth = Auth::new(
         opt.client_id.clone(),
-        Permission::new_read().offline_access(true),
+        Permission::new_read()
+            .write(opt.read_write)
+            .offline_access(true),
         REDIRECT_URI.to_owned(),
     );
 
@@ -54,6 +56,7 @@ async fn main_login(opt: OptLogin) -> Result<()> {
     eprintln!("Login successfully, saving credential...");
 
     login::Credential {
+        readonly: !opt.read_write,
         client_id: opt.client_id,
         redirect_uri: REDIRECT_URI.to_owned(),
         refresh_token,
@@ -100,9 +103,10 @@ async fn main_mount(opt: OptMount) -> Result<()> {
         .context("No credential file provided")?;
 
     let config = config::Config::merge_from_default(opt.config.as_deref(), &opt.option)?;
+    let readonly = config.permission.readonly;
 
-    let onedrive = ManagedOnedrive::login(credential_path, config.relogin).await?;
-    let vfs = vfs::Vfs::new(FUSE_ROOT_ID, config.vfs, onedrive.clone())
+    let onedrive = ManagedOnedrive::login(credential_path, config.relogin, readonly).await?;
+    let vfs = vfs::Vfs::new(FUSE_ROOT_ID, readonly, config.vfs, onedrive.clone())
         .await
         .context("Failed to initialize vfs")?;
 
@@ -145,6 +149,10 @@ struct OptLogin {
     /// The client id used for OAuth2.
     #[structopt(long)]
     client_id: String,
+
+    /// Request for read-write instead of read-only permission.
+    #[structopt(short = "w", long)]
+    read_write: bool,
 
     /// The login code for Code-Auth.
     /// If not provided, the program will interactively open your browser and

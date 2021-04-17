@@ -1,5 +1,5 @@
 use crate::config::de_duration_sec;
-use anyhow::{Context as _, Result};
+use anyhow::{ensure, Context as _, Result};
 use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -30,12 +30,23 @@ pub struct ManagedOnedrive {
 }
 
 impl ManagedOnedrive {
-    pub async fn login(credential_file: PathBuf, config: ReloginConfig) -> Result<Self> {
+    pub async fn login(
+        credential_file: PathBuf,
+        config: ReloginConfig,
+        mount_readonly: bool,
+    ) -> Result<Self> {
         log::info!("Logining...");
-        let mut cred = Credential::load(&credential_file)?;
+        let mut cred = Credential::load(&credential_file)
+            .context("Invalid credential file. Try to re-login.")?;
+        ensure!(
+            !cred.readonly || mount_readonly,
+            "Cannot mount as read-write using read-only token. Please re-login to grant read-write permission.",
+        );
         let auth = Auth::new(
             cred.client_id.clone(),
-            Permission::new_read().offline_access(true),
+            Permission::new_read()
+                .write(!cred.readonly)
+                .offline_access(true),
             cred.redirect_uri.clone(),
         );
         let resp = auth
@@ -140,6 +151,7 @@ impl ManagedOnedrive {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Credential {
+    pub readonly: bool,
     pub client_id: String,
     pub redirect_uri: String,
     pub refresh_token: String,
