@@ -39,6 +39,8 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
       - [ ] O_TRUNC
       - [ ] O_CREAT
     - [ ] rename
+      - [x] Conflict free move
+      - [ ] Move and replace
     - [ ] rmdir
     - [ ] setattr
     - [ ] unlink

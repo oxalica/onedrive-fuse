@@ -254,6 +254,36 @@ impl Vfs {
         );
         Ok((ino, attr, self.ttl()))
     }
+
+    pub async fn rename(
+        &self,
+        parent_ino: u64,
+        name: &OsStr,
+        new_parent_ino: u64,
+        new_name: &OsStr,
+    ) -> Result<()> {
+        self.write_guard()?;
+        let name = cvt_filename(name)?;
+        let new_name = cvt_filename(new_name)?;
+        let parent_id = self.id_pool.get_item_id(parent_ino)?;
+        let new_parent_id = self.id_pool.get_item_id(new_parent_ino)?;
+        self.inode_pool
+            .rename(
+                &parent_id,
+                name,
+                &new_parent_id,
+                new_name,
+                &*self.onedrive().await,
+            )
+            .await?;
+        log::trace!(
+            target: "vfs::dir",
+            "rename: parent_id={:?} parent_ino={} name={} new_parent_id={:?} new_parent_ino={} new_name={}",
+            parent_id, parent_ino, name.as_str(),
+            new_parent_id, new_parent_ino, new_name.as_str(),
+        );
+        Ok(())
+    }
 }
 
 fn cvt_filename(name: &OsStr) -> Result<&FileName> {

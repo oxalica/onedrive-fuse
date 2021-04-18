@@ -264,6 +264,25 @@ impl fuse::Filesystem for Filesystem {
             }
         })
     }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEmpty,
+    ) {
+        let name = name.to_owned();
+        let newname = newname.to_owned();
+        self.spawn(|inner| async move {
+            match inner.vfs.rename(parent, &name, newparent, &newname).await {
+                Ok(_) => reply.ok(),
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        })
+    }
 }
 
 fn to_blocks_ceil(bytes: u64) -> u64 {

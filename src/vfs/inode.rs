@@ -1,6 +1,7 @@
 //! Directory hierarachy and item attributes.
 use crate::vfs::error::{Error, Result};
-use indexmap::IndexMap;
+use http::StatusCode;
+use indexmap::{map::MutableKeys, IndexMap};
 use lru_cache::LruCache;
 use onedrive_api::{
     option::{CollectionOption, DriveItemPutOption, ObjectOption},
@@ -353,13 +354,132 @@ impl InodePool {
                     let mut parent_map = self.parent_map.lock().unwrap();
                     let id: Arc<str> = (&*id.0).into();
                     let child_idx = children.len();
-                    children.insert(name.as_str().to_owned(), id.clone());
+                    assert!(children
+                        .insert(name.as_str().to_owned(), id.clone())
+                        .is_none());
                     parent_map.insert(id, (parent_id.clone(), child_idx));
                 }
             }
         }
 
         Ok((id, attr))
+    }
+
+    pub async fn rename(
+        &self,
+        parent_id: &ItemId,
+        name: &FileName,
+        new_parent_id: &ItemId,
+        new_name: &FileName,
+        onedrive: &OneDrive,
+    ) -> Result<()> {
+        let _guard = self.fetch_guard.read().await;
+
+        let parent_meta = self.get_or_fetch_children(parent_id, onedrive).await?;
+        let parent_meta = parent_meta.lock().await;
+        let parent_meta = parent_meta.as_ref().expect("Already populated");
+        let mut children = parent_meta.children.lock().await;
+        let children = children.as_mut().expect("Already populated");
+
+        let (child_idx, _, item_id) = children.get_full(name.as_str()).ok_or(Error::NotFound)?;
+        let item_id = ItemId((&**item_id).to_owned());
+
+        let do_move = || async {
+            log::debug!(
+                "Move {:?} to directory {:?} with new name {:?}",
+                item_id,
+                new_parent_id,
+                new_name,
+            );
+            match onedrive
+                .move_with_option(
+                    ItemLocation::from_id(&item_id),
+                    ItemLocation::from_id(&new_parent_id),
+                    Some(new_name),
+                    DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Fail),
+                )
+                .await
+            {
+                Ok(_) => Ok(()),
+                // 400 Bad Request is responsed when the destination item is not a directory.
+                // `error: { code: "invalidRequest", message: "Bad Argument" }`
+                Err(e) if e.status_code() == Some(StatusCode::BAD_REQUEST) => {
+                    Err(Error::NotADirectory)
+                }
+                Err(e) => Err(e.into()),
+            }
+        };
+
+        // For renames in the same directory, simply rename in the entry map and return.
+        if parent_id == new_parent_id {
+            if name.as_str() == new_name.as_str() {
+                return Ok(());
+            }
+            do_move().await?;
+
+            log::debug!("Same directory move: {:?}", item_id);
+            // A tricky way to modify the key but keep all indices.
+            let (_, v) = children.swap_remove_index(child_idx).unwrap();
+            assert!(children.insert(new_name.as_str().to_owned(), v).is_none());
+            if child_idx + 1 != children.len() {
+                children.swap_indices(child_idx, children.len() - 1);
+            }
+
+            return Ok(());
+        }
+
+        // Otherwise, we need to first lock the destination directory cache if exists.
+        let new_parent_meta = self
+            .meta_map
+            .lock()
+            .unwrap()
+            .get_mut(new_parent_id)
+            .cloned();
+        if let Some(new_parent_meta) = new_parent_meta {
+            if let Some(new_parent_meta) = &*new_parent_meta.lock().await {
+                if let Some(new_children) = &mut *new_parent_meta.children.lock().await {
+                    // Ensure the move succeed before maintain the cache.
+                    do_move().await?;
+
+                    log::debug!(
+                        "Add {:?} to the cached destination directory {:?}",
+                        item_id,
+                        new_parent_id,
+                    );
+                    let mut parent_map = self.parent_map.lock().unwrap();
+                    // Add a new entry to the new parent, since the move operation succeeds.
+                    let id: Arc<str> = (&*item_id.0).into();
+                    let child_id = new_children.len();
+                    assert!(new_children
+                        .insert(new_name.as_str().to_owned(), id.clone())
+                        .is_none());
+                    parent_map.insert(id, (new_parent_id.clone(), child_id));
+
+                    // FIXME: Dedup this shit.
+                } else {
+                    do_move().await?;
+                }
+            } else {
+                do_move().await?;
+            }
+        } else {
+            do_move().await?;
+        }
+
+        // Remove the entry from the old parent, since the move operation succeeds.
+        log::debug!(
+            "Remove {:?} from cached source directory {:?}",
+            item_id,
+            parent_id,
+        );
+        let mut parent_map = self.parent_map.lock().unwrap();
+        if child_idx + 1 != children.len() {
+            // Maintain reverse reference of the last entry to be swapped.
+            parent_map[&*children.last().unwrap().1].1 = child_idx;
+        }
+        children.swap_remove_index(child_idx);
+
+        Ok(())
     }
 
     /// Clear all cache.
@@ -446,7 +566,7 @@ impl InodePool {
                         );
                         let id: Arc<str> = (&*item_id.0).into();
                         let child_idx = children.len();
-                        children.insert(new_name, id.clone());
+                        assert!(children.insert(new_name, id.clone()).is_none());
                         parent_map.insert(id, (new_parent_id, child_idx));
                     }
                 }
