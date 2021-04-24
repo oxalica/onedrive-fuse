@@ -1,7 +1,7 @@
 //! Directory hierarachy and item attributes.
 use crate::vfs::error::{Error, Result};
 use http::StatusCode;
-use indexmap::{map::MutableKeys, IndexMap};
+use indexmap::IndexMap;
 use lru_cache::LruCache;
 use onedrive_api::{
     option::{CollectionOption, DriveItemPutOption, ObjectOption},
@@ -480,13 +480,6 @@ impl InodePool {
         children.swap_remove_index(child_idx);
 
         Ok(())
-    }
-
-    /// Clear all cache.
-    pub async fn clear_cache(&self) {
-        let _guard = self.fetch_guard.write().await;
-        self.meta_map.lock().unwrap().clear();
-        // Parent map will be automatically clear since it's a weak map.
     }
 
     /// Sync item changes from remote. Items not in cache are skipped.

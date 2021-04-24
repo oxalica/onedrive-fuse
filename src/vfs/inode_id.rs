@@ -8,6 +8,7 @@ use std::{
 
 pub struct InodeIdPool {
     inner: SyncMutex<PoolInner>,
+    root_ino: u64,
 }
 
 struct PoolInner {
@@ -19,17 +20,26 @@ struct PoolInner {
 }
 
 impl InodeIdPool {
-    pub fn new(root_ino: u64, root_item_id: ItemId) -> Self {
-        let this = InodeIdPool {
+    pub fn new(root_ino: u64) -> Self {
+        InodeIdPool {
             inner: SyncMutex::new(PoolInner {
-                inode_counter: root_ino,
+                // Do not allocate root inode id automatically.
+                inode_counter: root_ino + 1,
                 map: HashMap::new(),
                 rev_map: HashMap::new(),
             }),
-        };
-        // Never freed.
-        assert_eq!(this.acquire_or_alloc(&root_item_id), root_ino);
-        this
+            root_ino,
+        }
+    }
+
+    /// Set the root item id. This method can only be called once.
+    pub fn set_root_item_id(&self, item_id: ItemId) {
+        let mut inner = self.inner.lock().unwrap();
+        assert!(inner
+            .map
+            .insert(self.root_ino, (1, item_id.clone()))
+            .is_none());
+        assert!(inner.rev_map.insert(item_id, self.root_ino).is_none());
     }
 
     /// Update InodeAttr of existing inode or allocate a new inode,

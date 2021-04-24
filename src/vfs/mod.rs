@@ -1,15 +1,14 @@
 use crate::login::ManagedOnedrive;
-use onedrive_api::{
-    option::ObjectOption, resource::DriveItemField, FileName, ItemLocation, OneDrive,
-};
+use onedrive_api::{FileName, OneDrive};
 use reqwest::Client;
 use serde::Deserialize;
 use std::{
     ffi::OsStr,
     ops::Deref,
-    sync::{Arc, Mutex as SyncMutex, Weak},
+    sync::{Arc, Weak},
     time::Duration,
 };
+use tokio::sync::{mpsc, oneshot};
 
 pub mod error;
 mod file;
@@ -48,31 +47,13 @@ impl Vfs {
         config: Config,
         onedrive: ManagedOnedrive,
     ) -> anyhow::Result<Arc<Self>> {
-        // Initialize tracker before everything else.
-        let this_referrer = Arc::new(SyncMutex::new(None));
-        let this_referrer2 = this_referrer.clone();
-        let tracker = tracker::Tracker::new(
-            Box::new(move |event| Box::pin(Self::sync_changes(this_referrer2.clone(), event))),
-            onedrive.clone(),
-            config.tracker,
-        )
-        .await?;
-
-        let root_item_id = onedrive
-            .get()
-            .await
-            .get_item_with_option(
-                ItemLocation::root(),
-                ObjectOption::new().select(&[DriveItemField::id]),
-            )
-            .await?
-            .expect("No If-None-Match")
-            .id
-            .expect("Missing id field");
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (init_tx, init_rx) = oneshot::channel();
+        let tracker = tracker::Tracker::new(event_tx, onedrive.clone(), config.tracker).await?;
 
         let this = Arc::new(Self {
             statfs: statfs::Statfs::new(config.statfs),
-            id_pool: inode_id::InodeIdPool::new(root_ino, root_item_id),
+            id_pool: inode_id::InodeIdPool::new(root_ino),
             inode_pool: inode::InodePool::new(config.inode),
             file_pool: file::FilePool::new(config.file)?,
             tracker,
@@ -80,30 +61,43 @@ impl Vfs {
             client: Client::new(),
             readonly,
         });
-        *this_referrer.lock().unwrap() = Some(Arc::downgrade(&this));
+
+        tokio::task::spawn(Self::sync_thread(Arc::downgrade(&this), event_rx, init_tx));
+        // Wait for initialization.
+        init_rx.await.expect("Initialization failed");
         Ok(this)
     }
 
-    async fn sync_changes(this: Arc<SyncMutex<Option<Weak<Self>>>>, event: tracker::Event) {
-        let this = match &*this.lock().unwrap() {
-            // FIXME
-            None => panic!("Remote changed during initialization"),
-            Some(weak) => match weak.upgrade() {
-                Some(arc) => arc,
+    async fn sync_thread(
+        this: Weak<Self>,
+        mut event_rx: mpsc::Receiver<tracker::Event>,
+        init_tx: oneshot::Sender<()>,
+    ) {
+        let mut init_tx = Some(init_tx);
+        while let Some(event) = event_rx.recv().await {
+            let this = match this.upgrade() {
+                Some(this) => this,
                 None => return,
-            },
-        };
+            };
 
-        // `FilePool` use download URL as snapshot and will not affected by changes.
-        match event {
-            tracker::Event::Clear => {
-                log::debug!("Clear all cache");
-                this.inode_pool.clear_cache().await;
-                this.file_pool.clear_cache();
-            }
-            tracker::Event::Update(items) => {
-                this.inode_pool.sync_items(&items).await;
-                this.file_pool.sync_items(&items);
+            // `FilePool` use download URL as snapshot and will not affected by changes.
+            let tracker::Event::Update(updated) = event;
+            this.inode_pool.sync_items(&updated).await;
+            this.file_pool.sync_items(&updated);
+
+            if let Some(init_tx) = init_tx.take() {
+                let root_id = updated
+                    .iter()
+                    .find(|item| item.root.is_some())
+                    .expect("No root item found")
+                    .id
+                    .as_ref()
+                    .expect("Missing id");
+                this.id_pool.set_root_item_id(root_id.clone());
+
+                if init_tx.send(()).is_err() {
+                    return;
+                }
             }
         }
     }

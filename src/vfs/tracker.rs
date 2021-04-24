@@ -6,12 +6,12 @@ use onedrive_api::{
 };
 use serde::Deserialize;
 use std::{
-    future::Future,
+    collections::HashSet,
     num::NonZeroUsize,
-    pin::Pin,
     sync::{Arc, Mutex as SyncMutex, Weak},
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -22,8 +22,6 @@ pub struct Config {
     max_changes: usize,
 }
 
-pub type EventHandler = Box<dyn FnMut(Event) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
-
 pub struct Tracker {
     last_sync_time: Option<Arc<SyncMutex<Instant>>>,
     config: Config,
@@ -31,15 +29,13 @@ pub struct Tracker {
 
 #[derive(Debug)]
 pub enum Event {
-    /// Clear current states.
-    Clear,
     /// Update on old states.
     Update(Vec<DriveItem>),
 }
 
 impl Tracker {
     pub async fn new(
-        handler: EventHandler,
+        event_tx: mpsc::Sender<Event>,
         onedrive: ManagedOnedrive,
         config: Config,
     ) -> anyhow::Result<Self> {
@@ -51,10 +47,9 @@ impl Tracker {
         }
 
         let last_sync_time = Arc::new(SyncMutex::new(Instant::now()));
-        let delta_url = get_delta_url_with_option(&*onedrive.get().await, &config).await?;
         tokio::spawn(tracking_thread(
-            handler,
-            delta_url,
+            None,
+            event_tx,
             onedrive,
             Arc::downgrade(&last_sync_time),
             config.clone(),
@@ -74,48 +69,32 @@ impl Tracker {
 }
 
 async fn tracking_thread(
-    mut handler: EventHandler,
-    mut delta_url: String,
+    mut delta_url: Option<String>,
+    event_tx: mpsc::Sender<Event>,
     onedrive: ManagedOnedrive,
     last_sync_time: Weak<SyncMutex<Instant>>,
     config: Config,
 ) {
-    log::info!("Tracking thread started");
+    log::debug!("Tracking thread started");
     let mut interval = tokio::time::interval(config.period);
-    interval.tick().await;
+
     loop {
+        // The first tick doesn't wait.
         interval.tick().await;
         let start_time = Instant::now();
 
         let onedrive = onedrive.get().await;
-        let need_clear = match sync_changes(&mut handler, &mut delta_url, &onedrive, &config).await
-        {
-            Ok(need_clear) => need_clear,
-            // Client error 410 Gone (resyncRequired) indicates our `delta_url` is expired.
-            Err(err) if err.status_code().map_or(false, |st| st.is_client_error()) => {
-                log::info!("Re-sync required. Delta URL is gone: {}", err);
-                true
+
+        match fetch_changes(&mut delta_url, &onedrive, &config).await {
+            // Wait for the next scan.
+            Ok(None) => {}
+            Ok(Some(changes)) => {
+                if event_tx.send(Event::Update(changes)).await.is_err() {
+                    return;
+                }
             }
-            // Maybe network error. Try again.
             Err(err) => {
                 log::error!("Failed to fetch changes: {}", err);
-                continue;
-            }
-        };
-
-        if need_clear {
-            log::warn!("Cache cleared");
-            // Retrive new delta url before the reset to ensure changes between them will be caught.
-            let ret = get_delta_url_with_option(&onedrive, &config).await;
-            // No matter what the result is, cache must be cleared.
-            handler(Event::Clear).await;
-            match ret {
-                Ok(url) => delta_url = url,
-                // Error. Try again.
-                Err(err) => {
-                    log::error!("Failed to retrive new delta url: {}", err);
-                    continue;
-                }
             }
         }
 
@@ -126,15 +105,21 @@ async fn tracking_thread(
     }
 }
 
-async fn get_delta_url_with_option(
+/// Fetch initial or delta changes with optional progress.
+///
+/// Returns `Some(changes)` or `None` when delta url is gone.
+async fn fetch_changes(
+    delta_url: &mut Option<String>,
     onedrive: &OneDrive,
     config: &Config,
-) -> onedrive_api::Result<String> {
-    // FIXME: Pass options from vfs.
-    Ok(onedrive
-        .get_root_latest_delta_url_with_option(
-            CollectionOption::new()
+) -> onedrive_api::Result<Option<Vec<DriveItem>>> {
+    let mut fetcher = match delta_url {
+        // First fetch.
+        None => {
+            log::info!("Fetching metadata of the whole tree...");
+            let opt = CollectionOption::new()
                 .page_size(config.fetch_page_size.into())
+                // FIXME: Pass options from vfs.
                 .select(&[
                     DriveItemField::id,
                     DriveItemField::name,
@@ -142,48 +127,61 @@ async fn get_delta_url_with_option(
                     DriveItemField::root,
                     DriveItemField::parent_reference,
                 ])
-                .select(InodeAttr::SELECT_FIELDS),
-        )
-        .await?)
-}
+                .select(InodeAttr::SELECT_FIELDS);
+            onedrive
+                .track_root_changes_from_initial_with_option(opt)
+                .await?
+        }
+        // Delta fetch.
+        Some(url) => {
+            log::debug!("Checking remote changes");
+            match onedrive.track_root_changes_from_delta_url(url).await {
+                Ok(fetcher) => fetcher,
+                Err(err) if err.status_code().map_or(false, |st| st.is_client_error()) => {
+                    log::info!("Re-sync required. Delta URL is gone: {}", err);
+                    *delta_url = None;
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    };
 
-/// Fetch and sync changes.
-///
-/// Return whether need to clear cache to re-sync.
-async fn sync_changes(
-    handler: &mut EventHandler,
-    delta_url: &mut String,
-    onedrive: &OneDrive,
-    config: &Config,
-) -> onedrive_api::Result<bool> {
-    log::trace!("Fetching and synchronizing changes...");
-
-    let mut fetcher = onedrive
-        .track_root_changes_from_delta_url(&delta_url)
-        .await?;
-
-    let mut total_changes = 0;
+    let mut page = 0usize;
+    let mut total_changes = 0usize;
+    let mut ret = Vec::new();
+    let mut seen_ids = HashSet::new();
     while let Some(changes) = fetcher.fetch_next_page(&onedrive).await? {
         total_changes += changes.len();
-        if config.max_changes < total_changes {
-            log::warn!(
-                "Too many changes: got more than {} changes (limit: {})",
-                total_changes,
-                config.max_changes,
-            );
-            return Ok(true);
-        }
-        if !changes.is_empty() {
-            handler(Event::Update(changes)).await;
+        page += 1;
+
+        // > The same item may appear more than once in a delta feed, for various reasons. You should use the last occurrence you see.
+        // See: https://docs.microsoft.com/en-us/graph/api/driveitem-delta?view=graph-rest-1.0&tabs=http#remarks
+        ret.extend(
+            changes
+                .into_iter()
+                .filter(|item| seen_ids.insert(item.id.clone().unwrap())),
+        );
+
+        if page >= 2 {
+            log::info!("Fetched {} changes...", total_changes);
         }
     }
 
-    if total_changes == 0 {
-        log::trace!("Nothing changed on remote side");
-    } else {
-        log::info!("Synchronized {} changes", total_changes);
+    if total_changes != 0 {
+        log::info!("Received {} changes in total", total_changes);
+
+        if log::log_enabled!(log::Level::Trace) {
+            use std::fmt::Write;
+            let mut buf = String::new();
+            for item in &ret {
+                writeln!(buf, "    {:?}", item).unwrap();
+            }
+            log::trace!("Changes:\n{}", buf);
+        }
     }
 
-    *delta_url = fetcher.delta_url().unwrap().to_owned();
-    Ok(false)
+    *delta_url = Some(fetcher.delta_url().expect("Missing delta url").to_owned());
+
+    Ok(Some(ret))
 }
