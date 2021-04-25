@@ -148,13 +148,6 @@ impl FilePool {
         file.read(offset, size).await
     }
 
-    pub fn clear_cache(&self) {
-        // Opened handles are using download_url as snapshot, which are not affected.
-        if let Some(cache) = &self.disk_cache {
-            cache.clear();
-        }
-    }
-
     pub fn sync_items(&self, items: &[DriveItem]) {
         // Opened handles are using download_url as snapshot, which are not affected.
         if let Some(cache) = &self.disk_cache {
@@ -392,10 +385,6 @@ impl DiskCache {
         );
         cache.insert(item_id.clone(), state.clone());
         Ok(Some(state))
-    }
-
-    fn clear(&self) {
-        self.cache.lock().unwrap().clear();
     }
 
     fn invalidate<'a>(&self, item_ids: impl IntoIterator<Item = &'a ItemId>) {
