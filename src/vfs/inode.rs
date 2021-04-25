@@ -23,24 +23,31 @@ pub struct InodeAttr {
 }
 
 impl InodeAttr {
-    pub const SELECT_FIELDS: &'static [DriveItemField] = &[
-        DriveItemField::size,
-        DriveItemField::last_modified_date_time,
-        DriveItemField::created_date_time,
-        DriveItemField::folder,
-    ];
+    pub fn parse_item(item: &DriveItem) -> anyhow::Result<InodeAttr> {
+        use anyhow::Context;
 
-    pub fn parse_item(item: &DriveItem) -> Option<InodeAttr> {
-        fn parse_time(s: &str) -> Option<SystemTime> {
-            humantime::parse_rfc3339(s).ok()
+        fn parse_time(fs_info: &serde_json::Value, field: &str) -> anyhow::Result<SystemTime> {
+            let s = fs_info
+                .get(field)
+                .and_then(|v| v.as_str())
+                .with_context(|| format!("Missing {}", field))?;
+            humantime::parse_rfc3339(s).with_context(|| format!("Invalid time: {:?}", s))
         }
 
-        Some(InodeAttr {
-            size: item.size? as u64,
-            mtime: parse_time(item.last_modified_date_time.as_deref()?)?,
-            crtime: parse_time(item.created_date_time.as_deref()?)?,
-            is_directory: item.folder.is_some(),
-        })
+        fn parse_attr(item: &DriveItem) -> anyhow::Result<InodeAttr> {
+            let fs_info = item
+                .file_system_info
+                .as_ref()
+                .context("Missing file_system_info")?;
+            Ok(InodeAttr {
+                size: item.size.context("Missing size")? as u64,
+                mtime: parse_time(&fs_info, "lastModifiedDateTime")?,
+                crtime: parse_time(&fs_info, "createdDateTime")?,
+                is_directory: item.folder.is_some(),
+            })
+        }
+
+        parse_attr(item).with_context(|| format!("Failed to parse item: {:?}", item))
     }
 }
 
@@ -185,6 +192,20 @@ impl Inode {
 type DirChildren = IndexMap<String, ItemId>;
 
 impl InodePool {
+    pub const SYNC_SELECT_FIELDS: &'static [DriveItemField] = &[
+        // Basic hierarchy information.
+        DriveItemField::id,
+        DriveItemField::name,
+        DriveItemField::parent_reference,
+        DriveItemField::root,
+        // Delta.
+        DriveItemField::deleted,
+        // InodeAttr.
+        DriveItemField::size,
+        DriveItemField::file_system_info,
+        DriveItemField::folder,
+    ];
+
     pub fn new(_config: Config) -> Self {
         Self {
             tree: SyncMutex::new(InodeTree::new()),

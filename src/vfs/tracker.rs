@@ -1,4 +1,4 @@
-use crate::{config::de_duration_sec, login::ManagedOnedrive, vfs::inode::InodeAttr};
+use crate::{config::de_duration_sec, login::ManagedOnedrive};
 use onedrive_api::{
     option::CollectionOption,
     resource::{DriveItem, DriveItemField},
@@ -36,6 +36,7 @@ pub enum Event {
 impl Tracker {
     pub async fn new(
         event_tx: mpsc::Sender<Event>,
+        select_fields: Vec<DriveItemField>,
         onedrive: ManagedOnedrive,
         config: Config,
     ) -> anyhow::Result<Self> {
@@ -50,6 +51,7 @@ impl Tracker {
         tokio::spawn(tracking_thread(
             None,
             event_tx,
+            select_fields,
             onedrive,
             Arc::downgrade(&last_sync_time),
             config.clone(),
@@ -71,6 +73,7 @@ impl Tracker {
 async fn tracking_thread(
     mut delta_url: Option<String>,
     event_tx: mpsc::Sender<Event>,
+    select_fields: Vec<DriveItemField>,
     onedrive: ManagedOnedrive,
     last_sync_time: Weak<SyncMutex<Instant>>,
     config: Config,
@@ -85,7 +88,7 @@ async fn tracking_thread(
 
         let onedrive = onedrive.get().await;
 
-        match fetch_changes(&mut delta_url, &onedrive, &config).await {
+        match fetch_changes(&mut delta_url, &select_fields, &onedrive, &config).await {
             // Wait for the next scan.
             Ok(None) => {}
             Ok(Some(changes)) => {
@@ -110,6 +113,7 @@ async fn tracking_thread(
 /// Returns `Some(changes)` or `None` when delta url is gone.
 async fn fetch_changes(
     delta_url: &mut Option<String>,
+    select_fields: &[DriveItemField],
     onedrive: &OneDrive,
     config: &Config,
 ) -> onedrive_api::Result<Option<Vec<DriveItem>>> {
@@ -119,15 +123,8 @@ async fn fetch_changes(
             log::info!("Fetching metadata of the whole tree...");
             let opt = CollectionOption::new()
                 .page_size(config.fetch_page_size.into())
-                // FIXME: Pass options from vfs.
-                .select(&[
-                    DriveItemField::id,
-                    DriveItemField::name,
-                    DriveItemField::deleted,
-                    DriveItemField::root,
-                    DriveItemField::parent_reference,
-                ])
-                .select(InodeAttr::SELECT_FIELDS);
+                .select(&[DriveItemField::id])
+                .select(select_fields);
             onedrive
                 .track_root_changes_from_initial_with_option(opt)
                 .await?

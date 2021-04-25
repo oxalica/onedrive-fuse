@@ -49,7 +49,16 @@ impl Vfs {
     ) -> anyhow::Result<Arc<Self>> {
         let (event_tx, event_rx) = mpsc::channel(1);
         let (init_tx, init_rx) = oneshot::channel();
-        let tracker = tracker::Tracker::new(event_tx, onedrive.clone(), config.tracker).await?;
+        let tracker = tracker::Tracker::new(
+            event_tx,
+            inode::InodePool::SYNC_SELECT_FIELDS
+                .iter()
+                .copied()
+                .collect(),
+            onedrive.clone(),
+            config.tracker,
+        )
+        .await?;
 
         let this = Arc::new(Self {
             statfs: statfs::Statfs::new(config.statfs),
