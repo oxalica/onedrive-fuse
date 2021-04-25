@@ -326,6 +326,33 @@ impl InodePool {
         Ok(())
     }
 
+    pub async fn remove(
+        &self,
+        parent_id: &ItemId,
+        name: &FileName,
+        directory: bool,
+        onedrive: &OneDrive,
+    ) -> Result<()> {
+        let item_id = {
+            let tree = self.tree.lock().unwrap();
+            let children = tree.get(parent_id).ok_or(Error::NotFound)?.children()?;
+            let item_id = children.get(name.as_str()).ok_or(Error::NotFound)?;
+            let inode = tree.get(item_id).unwrap();
+            if directory && !inode.children()?.is_empty() {
+                return Err(Error::DirectoryNotEmpty);
+            }
+            if !directory && matches!(inode, Inode::Dir { .. }) {
+                return Err(Error::IsADirectory);
+            }
+            item_id.clone()
+        };
+
+        onedrive.delete(ItemLocation::from_id(&item_id)).await?;
+
+        self.tree.lock().unwrap().remove_item(&item_id);
+        Ok(())
+    }
+
     /// Sync item changes from remote. Items not in cache are skipped.
     pub fn sync_items(&self, updated: &[DriveItem]) {
         let mut tree = self.tree.lock().unwrap();
@@ -339,12 +366,14 @@ impl InodePool {
 
             // Remove an existing item.
             if item.deleted.is_some() {
-                if item.folder.is_some() {
-                    log::debug!("Mark remove for directory {:?}", item_id);
-                    dir_marked_deleted.insert(item_id);
-                } else {
-                    log::debug!("Remove file {:?}", item_id);
-                    tree.remove_item(item_id);
+                if tree.get(item_id).is_some() {
+                    if item.folder.is_some() {
+                        log::debug!("Mark remove for directory {:?}", item_id);
+                        dir_marked_deleted.insert(item_id);
+                    } else {
+                        log::debug!("Remove file {:?}", item_id);
+                        tree.remove_item(item_id);
+                    }
                 }
                 continue;
             }

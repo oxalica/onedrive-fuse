@@ -283,6 +283,26 @@ impl fuse::Filesystem for Filesystem {
             }
         })
     }
+
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name = name.to_owned();
+        self.spawn(|inner| async move {
+            match inner.vfs.remove_dir(parent, &name).await {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        })
+    }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name = name.to_owned();
+        self.spawn(|inner| async move {
+            match inner.vfs.remove_file(parent, &name).await {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        })
+    }
 }
 
 fn to_blocks_ceil(bytes: u64) -> u64 {

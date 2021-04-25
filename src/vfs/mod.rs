@@ -275,6 +275,36 @@ impl Vfs {
         );
         Ok(())
     }
+
+    pub async fn remove_dir(&self, parent_ino: u64, name: &OsStr) -> Result<()> {
+        self.write_guard()?;
+        let name = cvt_filename(name)?;
+        let parent_id = self.id_pool.get_item_id(parent_ino)?;
+        self.inode_pool
+            .remove(&parent_id, name, true, &*self.onedrive().await)
+            .await?;
+        log::trace!(
+            target: "vfs::dir",
+            "remove_dir: parent_id={:?} parent_ino={} name={}",
+            parent_id, parent_ino, name.as_str(),
+        );
+        Ok(())
+    }
+
+    pub async fn remove_file(&self, parent_ino: u64, name: &OsStr) -> Result<()> {
+        self.write_guard()?;
+        let name = cvt_filename(name)?;
+        let parent_id = self.id_pool.get_item_id(parent_ino)?;
+        self.inode_pool
+            .remove(&parent_id, name, false, &*self.onedrive().await)
+            .await?;
+        log::trace!(
+            target: "vfs::dir",
+            "remove_file: parent_id={:?} parent_ino={} name={}",
+            parent_id, parent_ino, name.as_str(),
+        );
+        Ok(())
+    }
 }
 
 fn cvt_filename(name: &OsStr) -> Result<&FileName> {

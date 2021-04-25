@@ -10,6 +10,10 @@ pub enum Error {
     NotFound,
     #[error("Not a directory")]
     NotADirectory,
+    #[error("Is a directory")]
+    IsADirectory,
+    #[error("Directory not empty")]
+    DirectoryNotEmpty,
     #[error("Invalid file name: {}", .0.to_string_lossy())]
     InvalidFileName(OsString),
     #[error("File exists")]
@@ -59,6 +63,8 @@ impl Error {
             // User errors.
             Self::NotFound => libc::ENOENT,
             Self::NotADirectory => libc::ENOTDIR,
+            Self::IsADirectory => libc::EISDIR,
+            Self::DirectoryNotEmpty => libc::ENOTEMPTY,
             Self::FileExists => libc::EEXIST,
             Self::AccessDenied => libc::EACCES,
             Self::InvalidFileName(_) => {
