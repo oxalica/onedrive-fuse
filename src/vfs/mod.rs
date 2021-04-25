@@ -82,7 +82,7 @@ impl Vfs {
 
             // `FilePool` use download URL as snapshot and will not affected by changes.
             let tracker::Event::Update(updated) = event;
-            this.inode_pool.sync_items(&updated).await;
+            this.inode_pool.sync_items(&updated);
             this.file_pool.sync_items(&updated);
 
             if let Some(init_tx) = init_tx.take() {
@@ -134,14 +134,8 @@ impl Vfs {
     ) -> Result<(u64, InodeAttr, Duration)> {
         let parent_id = self.id_pool.get_item_id(parent_ino)?;
         let child_name = cvt_filename(child_name)?;
-        let id = self
-            .inode_pool
-            .lookup(&parent_id, child_name, &*self.onedrive().await)
-            .await?;
-        let attr = self
-            .inode_pool
-            .get_attr(&id, &*self.onedrive().await)
-            .await?;
+        let id = self.inode_pool.lookup(&parent_id, child_name)?;
+        let attr = self.inode_pool.get_attr(&id)?;
         let ino = self.id_pool.acquire_or_alloc(&id);
         log::trace!(target: "vfs::inode", "lookup: id={:?} ino={} attr={:?}", id, ino, attr);
         Ok((ino, attr, self.ttl()))
@@ -155,10 +149,7 @@ impl Vfs {
 
     pub async fn get_attr(&self, ino: u64) -> Result<(InodeAttr, Duration)> {
         let id = self.id_pool.get_item_id(ino)?;
-        let attr = self
-            .inode_pool
-            .get_attr(&id, &*self.onedrive().await)
-            .await?;
+        let attr = self.inode_pool.get_attr(&id)?;
         log::trace!(target: "vfs::inode", "get_attr: id={:?} ino={} attr={:?}", id, ino, attr);
         Ok((attr, self.ttl()))
     }
@@ -183,10 +174,7 @@ impl Vfs {
         count: usize,
     ) -> Result<impl AsRef<[DirEntry]>> {
         let parent_id = self.id_pool.get_item_id(ino)?;
-        let ret = self
-            .inode_pool
-            .read_dir(&parent_id, offset, count, &*self.onedrive().await)
-            .await?;
+        let ret = self.inode_pool.read_dir(&parent_id, offset, count)?;
         log::trace!(target: "vfs::dir", "read_dir: ino={} offset={}", ino, offset);
         Ok(ret)
     }
