@@ -30,13 +30,13 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] releasedir
     - [x] statfs
   - [ ] Write
-    - [ ] create
+    - [x] create
     - [x] mkdir
     - [ ] mknod
-    - [ ] open
+    - [x] open
       - [x] O_WRONLY/O_RDWR
-      - [ ] O_TRUNC
-      - [ ] O_CREAT
+      - [x] O_TRUNC
+      - [x] O_EXCL
     - [ ] rename
       - [x] Conflict free move
       - [ ] Move and replace

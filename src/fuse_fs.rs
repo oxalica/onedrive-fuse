@@ -209,6 +209,39 @@ impl fuse::Filesystem for Filesystem {
         });
     }
 
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        flags: u32,
+        reply: ReplyCreate,
+    ) {
+        log::trace!("open flags: {:#x}", flags);
+
+        let _write = (flags & libc::O_WRONLY as u32) != 0;
+        let exclusive = (flags & libc::O_EXCL as u32) != 0;
+        let truncate = (flags & libc::O_TRUNC as u32) != 0;
+        let ret_flags = flags & (libc::O_WRONLY | libc::O_EXCL | libc::O_TRUNC) as u32;
+
+        let name = name.to_owned();
+        self.spawn(|inner| async move {
+            match inner
+                .vfs
+                .open_create_file(parent, &name, truncate, exclusive)
+                .await
+            {
+                Ok((ino, fh, attr, ttl)) => {
+                    let ttl = dur_to_timespec(ttl);
+                    let attr = inner.cvt_attr(ino, attr);
+                    reply.created(&ttl, &attr, GENERATION, fh, ret_flags)
+                }
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        });
+    }
+
     fn release(
         &mut self,
         _req: &Request,

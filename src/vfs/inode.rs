@@ -379,6 +379,19 @@ impl InodePool {
         inode.set_attr(f(attr));
     }
 
+    /// Insert a new item to a directory.
+    pub fn insert_item(
+        &self,
+        parent_id: ItemId,
+        child_name: &FileName,
+        child_id: ItemId,
+        child_attr: InodeAttr,
+    ) {
+        let mut tree = self.tree.lock().unwrap();
+        tree.insert_item(child_id.clone(), child_attr);
+        tree.set_parent(&child_id, Some((parent_id, child_name.as_str().to_owned())))
+    }
+
     /// Sync item changes from remote. Items not in cache are skipped.
     pub fn sync_items(&self, updated: &[DriveItem]) {
         let mut tree = self.tree.lock().unwrap();

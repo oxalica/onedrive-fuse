@@ -222,6 +222,42 @@ impl Vfs {
         Ok(fh)
     }
 
+    pub async fn open_create_file(
+        &self,
+        parent_ino: u64,
+        child_name: &OsStr,
+        truncate: bool,
+        exclusive: bool,
+    ) -> Result<(u64, u64, InodeAttr, Duration)> {
+        self.write_guard()?;
+        let parent_id = self.id_pool.get_item_id(parent_ino)?;
+        let child_name = cvt_filename(child_name)?;
+        if !truncate {
+            // FIXME: Not atomic.
+            match self.inode_pool.lookup(&parent_id, child_name) {
+                Ok(id) => {
+                    if exclusive {
+                        return Err(Error::FileExists);
+                    }
+                    let attr = self.inode_pool.get_attr(&id)?;
+                    let ino = self.id_pool.acquire_or_alloc(&id);
+                    let fh = self.open_file(ino, true).await?;
+                    return Ok((ino, fh, attr, self.ttl()));
+                }
+                Err(Error::NotFound) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        let (fh, item_id, attr) = self
+            .file_pool
+            .open_create_empty(&parent_id, child_name, &*self.onedrive().await)
+            .await?;
+        self.inode_pool
+            .insert_item(parent_id.clone(), child_name, item_id.clone(), attr.clone());
+        let ino = self.id_pool.acquire_or_alloc(&item_id);
+        Ok((ino, fh, attr, self.ttl()))
+    }
+
     pub async fn close_file(&self, ino: u64, fh: u64) -> Result<()> {
         self.file_pool.close(fh).await?;
         log::trace!(target: "vfs::file", "close_file: ino={} fh={}", ino, fh);
