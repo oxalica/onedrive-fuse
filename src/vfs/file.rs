@@ -452,7 +452,7 @@ impl DiskCache {
         {
             let mut cache = self.cache.lock().unwrap();
             for item in items {
-                if item.folder.is_some() {
+                if item.folder.is_some() || item.deleted.is_some() {
                     continue;
                 }
                 let id = item.id.clone().expect("Missing id");

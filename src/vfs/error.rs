@@ -89,6 +89,7 @@ impl Error {
             | Self::UnexpectedEndOfDownload { .. }
             | Self::IoError(_) => {
                 log::error!("{}", self);
+                log::debug!("{:?}", self);
                 libc::EIO
             }
 
