@@ -1,11 +1,14 @@
 use crate::{
     config::de_duration_sec,
     login::ManagedOnedrive,
-    vfs::{Error, Result},
+    vfs::{Error, Result, UpdateEvent},
 };
 use bytes::Bytes;
 use lru_cache::LruCache;
-use onedrive_api::{resource::DriveItem, ItemId, ItemLocation, OneDrive};
+use onedrive_api::{
+    resource::{DriveItem, DriveItemField},
+    ItemId, ItemLocation, OneDrive, Tag,
+};
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
 use sharded_slab::Slab;
@@ -66,6 +69,7 @@ fn default_disk_cache_dir() -> PathBuf {
 pub struct FilePool {
     handles: Slab<File>,
     disk_cache: Option<DiskCache>,
+    event_tx: mpsc::Sender<UpdateEvent>,
     config: Config,
 }
 
@@ -74,10 +78,14 @@ pub struct UpdatedFileAttr {
     pub item_id: ItemId,
     pub size: u64,
     pub mtime: SystemTime,
+    /// `None` indicates that the CTag is currently unknown.
+    pub c_tag: Option<Tag>,
 }
 
 impl FilePool {
-    pub fn new(config: Config) -> anyhow::Result<Self> {
+    pub const SYNC_SELECT_FIELDS: &'static [DriveItemField] = &[DriveItemField::c_tag];
+
+    pub fn new(event_tx: mpsc::Sender<UpdateEvent>, config: Config) -> anyhow::Result<Self> {
         Ok(Self {
             handles: Slab::new(),
             disk_cache: if config.disk_cache.enable {
@@ -85,6 +93,7 @@ impl FilePool {
             } else {
                 None
             },
+            event_tx,
             config,
         })
     }
@@ -97,13 +106,14 @@ impl FilePool {
         usize::try_from(fh).unwrap()
     }
 
-    // Fetch file size and download URL.
-    async fn fetch_meta(item_id: &ItemId, onedrive: &OneDrive) -> Result<(u64, String)> {
+    // Fetch file size, CTag and download URL.
+    async fn fetch_meta(item_id: &ItemId, onedrive: &OneDrive) -> Result<(u64, Tag, String)> {
         // `download_url` is available without `$select`.
         let item = onedrive.get_item(ItemLocation::from_id(item_id)).await?;
         let file_size = item.size.unwrap() as u64;
+        let tag = item.c_tag.unwrap();
         let download_url = item.download_url.unwrap();
-        Ok((file_size, download_url))
+        Ok((file_size, tag, download_url))
     }
 
     async fn open_inner(
@@ -119,9 +129,9 @@ impl FilePool {
                 return Ok(File::Cached(state));
             }
 
-            let (file_size, download_url) = Self::fetch_meta(item_id, onedrive).await?;
+            let (file_size, c_tag, download_url) = Self::fetch_meta(item_id, onedrive).await?;
             if let Some(state) =
-                cache.try_alloc_and_fetch(item_id, file_size, &download_url, client)?
+                cache.try_alloc_and_fetch(item_id, file_size, c_tag, &download_url, client)?
             {
                 log::debug!("Caching file {:?}, url: {}", item_id, download_url);
                 return Ok(File::Cached(state));
@@ -133,7 +143,8 @@ impl FilePool {
         } else if write_mode {
             return Err(Error::WriteWithoutCache);
         } else {
-            Self::fetch_meta(item_id, onedrive).await?
+            let (file_size, _, download_url) = Self::fetch_meta(item_id, onedrive).await?;
+            (file_size, download_url)
         };
 
         log::debug!("Streaming file {:?}, url: {}", item_id, download_url);
@@ -177,7 +188,12 @@ impl FilePool {
             .get(Self::fh_to_key(fh))
             .ok_or(Error::InvalidHandle(fh))?
             .clone();
-        file.read(offset, size).await
+        match file {
+            File::Streaming { file_size, state } => {
+                state.lock().await.read(file_size, offset, size).await
+            }
+            File::Cached(state) => FileCache::read(&state, offset, size).await,
+        }
     }
 
     /// Write to cached file. Returns item id and file size after the write.
@@ -193,20 +209,25 @@ impl FilePool {
             .get(Self::fh_to_key(fh))
             .ok_or(Error::InvalidHandle(fh))?
             .clone();
-        file.write(offset, data, onedrive, self.config.upload.clone())
-            .await
+        match file {
+            File::Streaming { .. } => panic!("Cannot stream in write mode"),
+            File::Cached(state) => {
+                FileCache::write(
+                    &state,
+                    offset,
+                    data,
+                    self.event_tx.clone(),
+                    onedrive,
+                    self.config.upload.clone(),
+                )
+                .await
+            }
+        }
     }
 
     pub async fn sync_items(&self, items: &[DriveItem]) {
         if let Some(cache) = &self.disk_cache {
-            cache
-                .invalidate(
-                    items
-                        .iter()
-                        .filter(|item| item.folder.is_none())
-                        .map(|item| item.id.as_ref().unwrap()),
-                )
-                .await;
+            cache.sync_items(items).await;
         }
     }
 }
@@ -217,33 +238,7 @@ enum File {
         file_size: u64,
         state: Arc<Mutex<FileStreamState>>,
     },
-    Cached(Arc<Mutex<FileCacheState>>),
-}
-
-impl File {
-    async fn read(&self, offset: u64, size: usize) -> Result<impl AsRef<[u8]>> {
-        match self {
-            Self::Streaming { file_size, state } => {
-                state.lock().await.read(*file_size, offset, size).await
-            }
-            Self::Cached(state) => FileCacheState::read(&*state, offset, size).await,
-        }
-    }
-
-    async fn write(
-        &self,
-        offset: u64,
-        data: &[u8],
-        onedrive: ManagedOnedrive,
-        upload_config: UploadConfig,
-    ) -> Result<UpdatedFileAttr> {
-        match self {
-            Self::Streaming { .. } => panic!("Cannot stream in write mode"),
-            Self::Cached(state) => {
-                FileCacheState::write(&*state, offset, data, onedrive, upload_config).await
-            }
-        }
-    }
+    Cached(Arc<FileCache>),
 }
 
 #[derive(Debug)]
@@ -375,11 +370,9 @@ async fn download_thread(
 struct DiskCache {
     dir: PathBuf,
     total_size: Arc<AtomicU64>,
-    cache: SyncMutex<LruCache<ItemId, FileCacheStateSlot>>,
+    cache: SyncMutex<LruCache<ItemId, Arc<FileCache>>>,
     config: Config,
 }
-
-type FileCacheStateSlot = Arc<Mutex<FileCacheState>>;
 
 impl DiskCache {
     fn new(config: Config) -> io::Result<Self> {
@@ -398,7 +391,7 @@ impl DiskCache {
         })
     }
 
-    fn get(&self, item_id: &ItemId) -> Option<FileCacheStateSlot> {
+    fn get(&self, item_id: &ItemId) -> Option<Arc<FileCache>> {
         self.cache.lock().unwrap().get_mut(item_id).cloned()
     }
 
@@ -406,9 +399,10 @@ impl DiskCache {
         &self,
         item_id: &ItemId,
         file_size: u64,
+        c_tag: Tag,
         download_url: &str,
         client: &reqwest::Client,
-    ) -> io::Result<Option<FileCacheStateSlot>> {
+    ) -> io::Result<Option<Arc<FileCache>>> {
         if self.config.disk_cache.max_cached_file_size < file_size {
             return Ok(None);
         }
@@ -430,42 +424,78 @@ impl DiskCache {
 
         let cache_file = tempfile::tempfile_in(&self.dir)?;
         cache_file.set_len(file_size)?;
-        let state = FileCacheState::fetch(
+
+        // The channel size doesn't really matter, since it's just for synchronization
+        // between downloading and writing.
+        let (chunk_tx, chunk_rx) = mpsc::channel(64);
+        let state = FileCache::new(
             item_id.clone(),
             file_size,
-            download_url.to_owned(),
+            c_tag,
+            chunk_rx,
             cache_file.into(),
             &self.total_size,
-            client.clone(),
-            self.config.download.clone(),
         );
         cache.insert(item_id.clone(), state.clone());
+        tokio::spawn(download_thread(
+            file_size,
+            download_url.to_owned(),
+            chunk_tx,
+            client.clone(),
+            self.config.download.clone(),
+        ));
         Ok(Some(state))
     }
 
-    async fn invalidate<'a>(&self, item_ids: impl IntoIterator<Item = &'a ItemId>) {
-        let mut invalidated = Vec::new();
+    async fn sync_items(&self, items: &[DriveItem]) {
+        let mut outdated = Vec::new();
         {
             let mut cache = self.cache.lock().unwrap();
-            for item_id in item_ids {
-                invalidated.extend(cache.remove(item_id));
+            for item in items {
+                if item.folder.is_some() {
+                    continue;
+                }
+                let id = item.id.clone().expect("Missing id");
+                let c_tag = item.c_tag.clone().expect("Missing c_tag");
+                let file = match cache.get_mut(&id) {
+                    Some(file) => file,
+                    None => continue,
+                };
+                let old_c_tag = file.c_tag.lock().unwrap();
+                if *old_c_tag == c_tag {
+                    log::debug!("Cached file {:?} is still up-to-date", *old_c_tag);
+                } else {
+                    log::debug!(
+                        "Cached file {:?} is outdated, ctag: {:?} -> {:?}",
+                        file.item_id,
+                        *old_c_tag,
+                        c_tag,
+                    );
+                    drop(old_c_tag);
+                    outdated.push(cache.remove(&id).unwrap());
+                }
             }
         }
-        for cache in invalidated {
-            cache.lock().await.status = FileCacheStatus::Invalidated;
+        for file in outdated {
+            file.state.lock().await.status = FileCacheStatus::Invalidated;
         }
     }
 }
 
 #[derive(Debug)]
+struct FileCache {
+    state: Mutex<FileCacheState>,
+    item_id: ItemId,
+    c_tag: SyncMutex<Tag>,
+    cache_total_size: Weak<AtomicU64>,
+}
+
+#[derive(Debug)]
 struct FileCacheState {
     status: FileCacheStatus,
-    item_id: ItemId,
     file_size: u64,
     available_size: watch::Receiver<u64>,
     cache_file: tokio::fs::File,
-
-    cache_total_size: Weak<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -480,57 +510,49 @@ enum FileCacheStatus {
     Invalidated,
 }
 
-impl FileCacheState {
-    fn fetch(
+impl FileCache {
+    fn new(
         item_id: ItemId,
         file_size: u64,
-        download_url: String,
+        c_tag: Tag,
+        chunk_rx: mpsc::Receiver<Bytes>,
         cache_file: tokio::fs::File,
         cache_total_size: &Arc<AtomicU64>,
-        client: reqwest::Client,
-        config: DownloadConfig,
-    ) -> Arc<Mutex<Self>> {
+    ) -> Arc<Self> {
         let (pos_tx, pos_rx) = watch::channel(0);
-        let state = Arc::new(Mutex::new(Self {
-            status: FileCacheStatus::Downloading,
+        let this = Arc::new(Self {
+            state: Mutex::new(FileCacheState {
+                status: FileCacheStatus::Downloading,
+                file_size,
+                available_size: pos_rx,
+                cache_file,
+            }),
             item_id,
-            file_size,
-            available_size: pos_rx,
-            cache_file,
+            c_tag: SyncMutex::new(c_tag),
             cache_total_size: Arc::downgrade(&cache_total_size),
-        }));
+        });
         cache_total_size.fetch_add(file_size, Ordering::Relaxed);
 
-        // The channel size doesn't really matter, since it's just for synchronization
-        // between downloading and writing.
-        let (chunk_tx, chunk_rx) = mpsc::channel(64);
-        tokio::spawn(download_thread(
-            file_size,
-            download_url,
-            chunk_tx,
-            client,
-            config,
-        ));
         tokio::spawn(Self::write_to_cache_thread(
-            Arc::downgrade(&state),
+            Arc::downgrade(&this),
             chunk_rx,
             pos_tx,
         ));
-        state
+        this
     }
 
     async fn write_to_cache_thread(
-        state: Weak<Mutex<FileCacheState>>,
+        this: Weak<FileCache>,
         mut chunk_rx: mpsc::Receiver<Bytes>,
         pos_tx: watch::Sender<u64>,
     ) {
         let mut pos = 0u64;
         while let Some(chunk) = chunk_rx.recv().await {
-            let state = match state.upgrade() {
-                Some(state) => state,
+            let file = match this.upgrade() {
+                Some(file) => file,
                 None => return,
             };
-            let mut guard = state.lock().await;
+            let mut guard = file.state.lock().await;
             guard.cache_file.seek(SeekFrom::Start(pos)).await.unwrap();
             guard.cache_file.write_all(&chunk).await.unwrap();
 
@@ -556,11 +578,11 @@ impl FileCacheState {
 
     /// Wait until download completion, or at least `end` bytes in total are available.
     async fn wait_bytes_available(
-        this: &FileCacheStateSlot,
+        this: &Arc<Self>,
         end: u64,
     ) -> Result<MutexGuard<'_, FileCacheState>> {
         let mut rx = {
-            let guard = this.lock().await;
+            let guard = this.state.lock().await;
             match guard.status {
                 FileCacheStatus::Available | FileCacheStatus::Dirty(_) => return Ok(guard),
                 FileCacheStatus::Invalidated => return Err(Error::Invalidated),
@@ -575,7 +597,7 @@ impl FileCacheState {
 
         while rx.changed().await.is_ok() && *rx.borrow() < end {}
 
-        let guard = this.lock().await;
+        let guard = this.state.lock().await;
         match guard.status {
             FileCacheStatus::Available | FileCacheStatus::Dirty(_) => return Ok(guard),
             FileCacheStatus::Invalidated => return Err(Error::Invalidated),
@@ -592,9 +614,9 @@ impl FileCacheState {
         }
     }
 
-    async fn read(this: &FileCacheStateSlot, offset: u64, size: usize) -> Result<Bytes> {
+    async fn read(this: &Arc<Self>, offset: u64, size: usize) -> Result<Bytes> {
         let end = {
-            let guard = this.lock().await;
+            let guard = this.state.lock().await;
             let file_size = guard.file_size;
             if file_size <= offset || size == 0 {
                 return Ok(Bytes::new());
@@ -615,13 +637,14 @@ impl FileCacheState {
     }
 
     async fn write(
-        this: &FileCacheStateSlot,
+        this: &Arc<Self>,
         offset: u64,
         data: &[u8],
+        event_tx: mpsc::Sender<UpdateEvent>,
         onedrive: ManagedOnedrive,
         config: UploadConfig,
     ) -> Result<UpdatedFileAttr> {
-        let file_size = this.lock().await.file_size;
+        let file_size = this.state.lock().await.file_size;
         if config.max_size < offset + data.len() as u64 {
             return Err(Error::FileTooLarge);
         }
@@ -633,7 +656,13 @@ impl FileCacheState {
             FileCacheStatus::Downloading | FileCacheStatus::Invalidated => unreachable!(),
             FileCacheStatus::Dirty(_) | FileCacheStatus::Available => {
                 guard.status = FileCacheStatus::Dirty(mtime);
-                tokio::spawn(Self::upload_thread(this.clone(), onedrive, mtime, config));
+                tokio::spawn(Self::upload_thread(
+                    this.clone(),
+                    onedrive,
+                    mtime,
+                    event_tx.clone(),
+                    config,
+                ));
             }
         }
 
@@ -646,36 +675,38 @@ impl FileCacheState {
 
         let new_size = guard.file_size.max(offset + data.len() as u64);
         if guard.file_size < new_size {
-            if let Some(total) = guard.cache_total_size.upgrade() {
+            if let Some(total) = this.cache_total_size.upgrade() {
                 total.fetch_add(new_size - guard.file_size, Ordering::Relaxed);
             }
         }
         guard.file_size = new_size;
         Ok(UpdatedFileAttr {
-            item_id: guard.item_id.clone(),
+            item_id: this.item_id.clone(),
             size: new_size,
             mtime: mtime_sys,
+            c_tag: None,
         })
     }
 
     async fn upload_thread(
-        this: Arc<Mutex<FileCacheState>>,
+        this: Arc<Self>,
         onedrive: ManagedOnedrive,
         lock_mtime: Instant,
+        event_tx: mpsc::Sender<UpdateEvent>,
         config: UploadConfig,
     ) {
         time::sleep(config.flush_delay).await;
 
         loop {
             // Check not changed since last lock.
-            let (item_id, data) = {
-                let mut guard = this.lock().await;
+            let data = {
+                let mut guard = this.state.lock().await;
                 match guard.status {
                     FileCacheStatus::Dirty(mtime) if mtime == lock_mtime => {
                         let mut buf = vec![0u8; guard.file_size as usize];
                         guard.cache_file.seek(SeekFrom::Start(0)).await.unwrap();
                         guard.cache_file.read_exact(&mut buf).await.unwrap();
-                        (guard.item_id.clone(), buf)
+                        buf
                     }
                     _ => return,
                 }
@@ -683,27 +714,46 @@ impl FileCacheState {
             let file_len = data.len();
 
             // Do upload.
-            log::info!("Uploading {:?} ({} B)", item_id, file_len);
-            match onedrive
+            log::info!("Uploading {:?} ({} B)", this.item_id, file_len);
+            let item = match onedrive
                 .get()
                 .await
-                .upload_small(ItemLocation::from_id(&item_id), data)
+                .upload_small(ItemLocation::from_id(&this.item_id), data)
                 .await
             {
-                Ok(_) => {
-                    log::info!("Uploaded {:?} ({} B)", item_id, file_len);
-                    break;
-                }
+                Ok(item) => item,
                 Err(err) => {
-                    log::error!("Failed to upload {:?} ({} B): {}", item_id, file_len, err);
+                    log::error!(
+                        "Failed to upload {:?} ({} B): {}",
+                        this.item_id,
+                        file_len,
+                        err,
+                    );
+                    // Retry
+                    time::sleep(config.retry_delay).await;
+                    continue;
                 }
-            }
+            };
 
-            // Retry
-            time::sleep(config.retry_delay).await;
+            log::info!("Uploaded {:?} ({} B)", this.item_id, file_len);
+
+            let attr = super::InodeAttr::parse_item(&item).expect("Invalid attrs");
+            assert_eq!(item.id.as_ref(), Some(&this.item_id));
+            assert_eq!(attr.size, file_len as u64);
+            let c_tag = item.c_tag.expect("Missing c_tag");
+            *this.c_tag.lock().unwrap() = c_tag.clone();
+            let _ = event_tx
+                .send(UpdateEvent::UpdateFile(UpdatedFileAttr {
+                    item_id: this.item_id.clone(),
+                    size: attr.size,
+                    mtime: attr.mtime,
+                    c_tag: Some(c_tag),
+                }))
+                .await;
+            break;
         }
 
-        let mut guard = this.lock().await;
+        let mut guard = this.state.lock().await;
         match guard.status {
             FileCacheStatus::Dirty(mtime) if mtime == lock_mtime => {
                 guard.status = FileCacheStatus::Available;
@@ -713,10 +763,10 @@ impl FileCacheState {
     }
 }
 
-impl Drop for FileCacheState {
+impl Drop for FileCache {
     fn drop(&mut self) {
         if let Some(arc) = self.cache_total_size.upgrade() {
-            arc.fetch_sub(self.file_size, Ordering::Relaxed);
+            arc.fetch_sub(self.state.get_mut().file_size, Ordering::Relaxed);
         }
     }
 }

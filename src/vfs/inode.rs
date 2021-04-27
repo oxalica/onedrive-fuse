@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use onedrive_api::{
     option::DriveItemPutOption,
     resource::{DriveItem, DriveItemField},
-    ConflictBehavior, FileName, ItemId, ItemLocation, OneDrive,
+    ConflictBehavior, FileName, ItemId, ItemLocation, OneDrive, Tag,
 };
 use serde::Deserialize;
 use std::{
@@ -14,12 +14,14 @@ use std::{
     time::SystemTime,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct InodeAttr {
     pub size: u64,
     pub mtime: SystemTime,
     pub crtime: SystemTime,
     pub is_directory: bool,
+    // Files have CTag, while directories have not.
+    pub c_tag: Option<Tag>,
 }
 
 impl InodeAttr {
@@ -44,6 +46,11 @@ impl InodeAttr {
                 mtime: parse_time(&fs_info, "lastModifiedDateTime")?,
                 crtime: parse_time(&fs_info, "createdDateTime")?,
                 is_directory: item.folder.is_some(),
+                c_tag: if item.folder.is_some() {
+                    None
+                } else {
+                    Some(item.c_tag.clone().context("Missing c_tag for file")?)
+                },
             })
         }
 
@@ -157,9 +164,9 @@ impl Inode {
         }
     }
 
-    fn attr(&self) -> InodeAttr {
+    fn attr(&self) -> &InodeAttr {
         match self {
-            Inode::File { attr } | Inode::Dir { attr, .. } => *attr,
+            Inode::File { attr } | Inode::Dir { attr, .. } => attr,
         }
     }
 
@@ -216,7 +223,7 @@ impl InodePool {
     /// Get attribute of an item.
     pub fn get_attr(&self, item_id: &ItemId) -> Result<InodeAttr> {
         let tree = self.tree.lock().unwrap();
-        Ok(tree.get(item_id).ok_or(Error::NotFound)?.attr())
+        Ok(tree.get(item_id).ok_or(Error::NotFound)?.attr().clone())
     }
 
     /// Lookup a child by name of an directory item.
@@ -243,7 +250,7 @@ impl InodePool {
             entries.push(DirEntry {
                 name: name.clone(),
                 item_id: child_id.clone(),
-                attr: child_attr,
+                attr: child_attr.clone(),
             });
         }
         Ok(entries)
@@ -274,7 +281,7 @@ impl InodePool {
         let id = item.id.expect("Missing id");
 
         let mut tree = self.tree.lock().unwrap();
-        tree.insert_item(id.clone(), attr);
+        tree.insert_item(id.clone(), attr.clone());
         tree.set_parent(&id, Some((parent_id.clone(), name.as_str().to_owned())));
 
         Ok((id, attr))
@@ -358,7 +365,7 @@ impl InodePool {
     pub fn update_attr(&self, item_id: &ItemId, f: impl FnOnce(InodeAttr) -> InodeAttr) {
         let mut tree = self.tree.lock().unwrap();
         let inode = tree.get_mut(item_id).unwrap();
-        let attr = inode.attr();
+        let attr = inode.attr().clone();
         inode.set_attr(f(attr));
     }
 

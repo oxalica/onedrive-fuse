@@ -1,5 +1,5 @@
 use crate::login::ManagedOnedrive;
-use onedrive_api::{FileName, OneDrive};
+use onedrive_api::{resource::DriveItem, FileName, OneDrive};
 use reqwest::Client;
 use serde::Deserialize;
 use std::{
@@ -29,6 +29,14 @@ pub struct Config {
     tracker: tracker::Config,
 }
 
+#[derive(Debug)]
+pub enum UpdateEvent {
+    /// Batch update from old states.
+    BatchUpdate(Vec<DriveItem>),
+    /// Update attribute of a single file due to modification.
+    UpdateFile(file::UpdatedFileAttr),
+}
+
 pub struct Vfs {
     statfs: statfs::Statfs,
     id_pool: inode_id::InodeIdPool,
@@ -50,9 +58,10 @@ impl Vfs {
         let (event_tx, event_rx) = mpsc::channel(1);
         let (init_tx, init_rx) = oneshot::channel();
         let tracker = tracker::Tracker::new(
-            event_tx,
+            event_tx.clone(),
             inode::InodePool::SYNC_SELECT_FIELDS
                 .iter()
+                .chain(file::FilePool::SYNC_SELECT_FIELDS)
                 .copied()
                 .collect(),
             onedrive.clone(),
@@ -64,7 +73,7 @@ impl Vfs {
             statfs: statfs::Statfs::new(config.statfs),
             id_pool: inode_id::InodeIdPool::new(root_ino),
             inode_pool: inode::InodePool::new(config.inode),
-            file_pool: file::FilePool::new(config.file)?,
+            file_pool: file::FilePool::new(event_tx, config.file)?,
             tracker,
             onedrive,
             client: Client::new(),
@@ -79,7 +88,7 @@ impl Vfs {
 
     async fn sync_thread(
         this: Weak<Self>,
-        mut event_rx: mpsc::Receiver<tracker::Event>,
+        mut event_rx: mpsc::Receiver<UpdateEvent>,
         init_tx: oneshot::Sender<()>,
     ) {
         let mut init_tx = Some(init_tx);
@@ -89,23 +98,34 @@ impl Vfs {
                 None => return,
             };
 
-            // `FilePool` use download URL as snapshot and will not affected by changes.
-            let tracker::Event::Update(updated) = event;
-            this.inode_pool.sync_items(&updated);
-            this.file_pool.sync_items(&updated).await;
+            match event {
+                UpdateEvent::BatchUpdate(updated) => {
+                    this.inode_pool.sync_items(&updated);
+                    this.file_pool.sync_items(&updated).await;
 
-            if let Some(init_tx) = init_tx.take() {
-                let root_id = updated
-                    .iter()
-                    .find(|item| item.root.is_some())
-                    .expect("No root item found")
-                    .id
-                    .as_ref()
-                    .expect("Missing id");
-                this.id_pool.set_root_item_id(root_id.clone());
+                    if let Some(init_tx) = init_tx.take() {
+                        let root_id = updated
+                            .iter()
+                            .find(|item| item.root.is_some())
+                            .expect("No root item found")
+                            .id
+                            .as_ref()
+                            .expect("Missing id");
+                        this.id_pool.set_root_item_id(root_id.clone());
 
-                if init_tx.send(()).is_err() {
-                    return;
+                        if init_tx.send(()).is_err() {
+                            return;
+                        }
+                    }
+                }
+                UpdateEvent::UpdateFile(updated) => {
+                    this.inode_pool
+                        .update_attr(&updated.item_id, |attr| InodeAttr {
+                            size: updated.size,
+                            mtime: updated.mtime,
+                            c_tag: Some(updated.c_tag.clone().unwrap()),
+                            ..attr
+                        });
                 }
             }
         }

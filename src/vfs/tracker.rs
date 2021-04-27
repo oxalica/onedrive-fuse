@@ -1,4 +1,4 @@
-use crate::{config::de_duration_sec, login::ManagedOnedrive};
+use crate::{config::de_duration_sec, login::ManagedOnedrive, vfs::UpdateEvent};
 use onedrive_api::{
     option::CollectionOption,
     resource::{DriveItem, DriveItemField},
@@ -27,15 +27,9 @@ pub struct Tracker {
     config: Config,
 }
 
-#[derive(Debug)]
-pub enum Event {
-    /// Update on old states.
-    Update(Vec<DriveItem>),
-}
-
 impl Tracker {
     pub async fn new(
-        event_tx: mpsc::Sender<Event>,
+        event_tx: mpsc::Sender<UpdateEvent>,
         select_fields: Vec<DriveItemField>,
         onedrive: ManagedOnedrive,
         config: Config,
@@ -72,7 +66,7 @@ impl Tracker {
 
 async fn tracking_thread(
     mut delta_url: Option<String>,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: mpsc::Sender<UpdateEvent>,
     select_fields: Vec<DriveItemField>,
     onedrive: ManagedOnedrive,
     last_sync_time: Weak<SyncMutex<Instant>>,
@@ -92,7 +86,11 @@ async fn tracking_thread(
             // Wait for the next scan.
             Ok(None) => {}
             Ok(Some(changes)) => {
-                if event_tx.send(Event::Update(changes)).await.is_err() {
+                if event_tx
+                    .send(UpdateEvent::BatchUpdate(changes))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
