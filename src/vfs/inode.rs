@@ -171,6 +171,7 @@ impl Inode {
             attr.is_directory, new_attr.is_directory,
             "Cannot change between file and directory",
         );
+        *attr = new_attr;
     }
 
     fn children(&self) -> Result<&DirChildren> {
