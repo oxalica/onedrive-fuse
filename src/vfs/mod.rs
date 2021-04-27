@@ -92,7 +92,7 @@ impl Vfs {
             // `FilePool` use download URL as snapshot and will not affected by changes.
             let tracker::Event::Update(updated) = event;
             this.inode_pool.sync_items(&updated);
-            this.file_pool.sync_items(&updated);
+            this.file_pool.sync_items(&updated).await;
 
             if let Some(init_tx) = init_tx.take() {
                 let root_id = updated
@@ -188,12 +188,14 @@ impl Vfs {
         Ok(ret)
     }
 
-    // TODO: Flags.
-    pub async fn open_file(&self, ino: u64) -> Result<u64> {
+    pub async fn open_file(&self, ino: u64, write: bool) -> Result<u64> {
+        if write {
+            self.write_guard()?;
+        }
         let item_id = self.id_pool.get_item_id(ino)?;
         let fh = self
             .file_pool
-            .open(&item_id, &*self.onedrive().await, &self.client)
+            .open(&item_id, write, &*self.onedrive().await, &self.client)
             .await?;
         log::trace!(target: "vfs::file", "open_file: ino={} fh={}", ino, fh);
         Ok(fh)
@@ -302,6 +304,26 @@ impl Vfs {
             target: "vfs::dir",
             "remove_file: parent_id={:?} parent_ino={} name={}",
             parent_id, parent_ino, name.as_str(),
+        );
+        Ok(())
+    }
+
+    pub async fn write_file(&self, ino: u64, fh: u64, offset: u64, data: &[u8]) -> Result<()> {
+        self.write_guard()?;
+        let updated = self
+            .file_pool
+            .write(fh, offset, data, self.onedrive.clone())
+            .await?;
+        self.inode_pool
+            .update_attr(&updated.item_id, |attr| InodeAttr {
+                size: updated.size,
+                mtime: updated.mtime,
+                ..attr
+            });
+        log::trace!(
+            target: "vfs::file",
+            "write_file: ino={} fh={} offset={} len={} updated_attr={:?}",
+            ino, fh, offset, data.len(), updated,
         );
         Ok(())
     }

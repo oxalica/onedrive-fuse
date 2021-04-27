@@ -34,8 +34,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] mkdir
     - [ ] mknod
     - [ ] open
-      - [ ] O_WRONLY
-      - [ ] O_RDWR
+      - [x] O_WRONLY/O_RDWR
       - [ ] O_TRUNC
       - [ ] O_CREAT
     - [ ] rename
@@ -44,7 +43,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] rmdir
     - [ ] setattr
     - [x] unlink
-    - [ ] write
+    - [x] write
   - [ ] Other
     - destroy
     - [ ] flush

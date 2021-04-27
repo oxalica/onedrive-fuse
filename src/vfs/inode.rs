@@ -353,6 +353,14 @@ impl InodePool {
         Ok(())
     }
 
+    /// Update attribute of an item.
+    pub fn update_attr(&self, item_id: &ItemId, f: impl FnOnce(InodeAttr) -> InodeAttr) {
+        let mut tree = self.tree.lock().unwrap();
+        let inode = tree.get_mut(item_id).unwrap();
+        let attr = inode.attr();
+        inode.set_attr(f(attr));
+    }
+
     /// Sync item changes from remote. Items not in cache are skipped.
     pub fn sync_items(&self, updated: &[DriveItem]) {
         let mut tree = self.tree.lock().unwrap();

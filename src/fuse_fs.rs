@@ -195,17 +195,15 @@ impl fuse::Filesystem for Filesystem {
     fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         // Read is always allowed.
         static_assertions::const_assert_eq!(libc::O_RDONLY, 0);
+        log::trace!("open flags: {:#x}", flags);
 
-        if (flags & libc::O_WRONLY as u32) != 0 {
-            reply.error(libc::EPERM);
-            return;
-        }
+        let write = (flags & libc::O_WRONLY as u32) != 0;
+        assert_eq!(flags & libc::O_TRUNC as u32, 0);
+        let ret_flags = flags & libc::O_WRONLY as u32;
 
         self.spawn(|inner| async move {
-            match inner.vfs.open_file(ino).await {
-                Ok(fh) => {
-                    reply.opened(fh, libc::O_RDONLY as u32);
-                }
+            match inner.vfs.open_file(ino, write).await {
+                Ok(fh) => reply.opened(fh, ret_flags),
                 Err(err) => reply.error(err.into_c_err()),
             }
         });
@@ -262,7 +260,7 @@ impl fuse::Filesystem for Filesystem {
                 }
                 Err(err) => reply.error(err.into_c_err()),
             }
-        })
+        });
     }
 
     fn rename(
@@ -281,7 +279,7 @@ impl fuse::Filesystem for Filesystem {
                 Ok(_) => reply.ok(),
                 Err(err) => reply.error(err.into_c_err()),
             }
-        })
+        });
     }
 
     fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
@@ -291,7 +289,7 @@ impl fuse::Filesystem for Filesystem {
                 Ok(()) => reply.ok(),
                 Err(err) => reply.error(err.into_c_err()),
             }
-        })
+        });
     }
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
@@ -301,7 +299,27 @@ impl fuse::Filesystem for Filesystem {
                 Ok(()) => reply.ok(),
                 Err(err) => reply.error(err.into_c_err()),
             }
-        })
+        });
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _flags: u32,
+        reply: ReplyWrite,
+    ) {
+        let data = data.to_owned();
+        self.spawn(|inner| async move {
+            match inner.vfs.write_file(ino, fh, offset as u64, &data).await {
+                // > Write should return exactly the number of bytes requested except on error.
+                Ok(()) => reply.written(data.len() as u32),
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        });
     }
 }
 

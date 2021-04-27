@@ -51,18 +51,8 @@ cache_ttl = 300
 
 [vfs.inode]
 
-[vfs.file]
-# Max number of chunks the streaming download buffer holds.
-# Once it's full (when read speed is slower than download speed), downloading is temporary blocked.
-# Chunks are from low-level connection. A chunk is about 4~16 KiB.
-stream_buffer_chunks = 256
-# Max retries to resume download when connection lost before raising error.
-download_max_retry = 5
-# Delay in seconds between each retry.
-download_retry_delay = 5
-
 [vfs.file.disk_cache]
-# Whether to enable on-disk file cache.
+# Whether to enable on-disk file cache. Required to support uploading.
 # Files smaller than `max_cached_file_size` are saved in LRU cache directory on disk.
 # When they are opened and not removed from cache, a downloding thread is running in background to
 # download the whole content of the file, though maybe programs only read some bytes of it.
@@ -78,3 +68,24 @@ max_files = 1024
 # Max total file size in cache. Default to be 256 MiB.
 # This must be not less than `max_cached_file_size`.
 max_total_size = 268435456
+
+[vfs.file.download]
+# Max number of chunks the streaming download buffer holds.
+# Once it's full (when read speed is slower than download speed), downloading is temporary blocked.
+# Chunks are from low-level connection. A chunk is about 4~16 KiB.
+stream_buffer_chunks = 256
+# Max retries to resume download when connection lost before raising error.
+max_retry = 5
+# Delay in seconds between each retry.
+retry_delay = 5
+
+[vfs.file.upload]
+# Max file size of a file open in write mode. Default to be 2 MiB.
+# This should be smaller than `vfs.disk_cache.max_cached_file_size` since the write mode requires
+# the file to be in disk cache.
+max_size = 2097152
+# Delay between write call and actual uploading.
+# Mutliple writes on a single file within this duration will only be uploaded once.
+flush_delay = 5
+# Delay in seconds between each retry.
+retry_delay = 5

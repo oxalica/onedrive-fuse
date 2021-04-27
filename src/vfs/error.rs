@@ -20,6 +20,8 @@ pub enum Error {
     FileExists,
     #[error("Access denied")]
     AccessDenied,
+    #[error("File changed in remote side, please re-open it")]
+    Invalidated,
 
     // Api and network errors.
     #[error("Api error: {0}")]
@@ -38,6 +40,10 @@ pub enum Error {
     // Not supported.
     #[error("Nonsequential read is not supported: current at {current_pos} but try to read {try_offset}")]
     NonsequentialRead { current_pos: u64, try_offset: u64 },
+    #[error("File is too large to write")]
+    FileTooLarge,
+    #[error("File writing is not supported without disk cache")]
+    WriteWithoutCache,
 
     // Fuse errors.
     // They are hard errors here, since `fuse` should guarantee that they are valid.
@@ -67,6 +73,7 @@ impl Error {
             Self::DirectoryNotEmpty => libc::ENOTEMPTY,
             Self::FileExists => libc::EEXIST,
             Self::AccessDenied => libc::EACCES,
+            Self::Invalidated => libc::EPERM,
             Self::InvalidFileName(_) => {
                 log::info!("{}", self);
                 libc::EINVAL
@@ -83,7 +90,7 @@ impl Error {
             }
 
             // Not supported
-            Self::NonsequentialRead { .. } => {
+            Self::NonsequentialRead { .. } | Self::FileTooLarge | Self::WriteWithoutCache => {
                 log::info!("{}", self);
                 libc::EPERM
             }
