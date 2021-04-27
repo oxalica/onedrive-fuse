@@ -22,6 +22,8 @@ pub enum Error {
     AccessDenied,
     #[error("File changed in remote side, please re-open it")]
     Invalidated,
+    #[error("File is uploading, you cannot move or remove it")]
+    Uploading,
 
     // Api and network errors.
     #[error("Api error: {0}")]
@@ -74,6 +76,7 @@ impl Error {
             Self::FileExists => libc::EEXIST,
             Self::AccessDenied => libc::EACCES,
             Self::Invalidated => libc::EPERM,
+            Self::Uploading => libc::ETXTBSY,
             Self::InvalidFileName(_) => {
                 log::info!("{}", self);
                 libc::EINVAL

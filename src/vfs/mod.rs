@@ -124,6 +124,7 @@ impl Vfs {
                             size: updated.size,
                             mtime: updated.mtime,
                             c_tag: Some(updated.c_tag.clone().unwrap()),
+                            dirty: updated.c_tag.is_none(),
                             ..attr
                         });
                 }
@@ -338,6 +339,7 @@ impl Vfs {
             .update_attr(&updated.item_id, |attr| InodeAttr {
                 size: updated.size,
                 mtime: updated.mtime,
+                dirty: true,
                 ..attr
             });
         log::trace!(

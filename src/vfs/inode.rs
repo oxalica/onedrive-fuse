@@ -22,6 +22,8 @@ pub struct InodeAttr {
     pub is_directory: bool,
     // Files have CTag, while directories have not.
     pub c_tag: Option<Tag>,
+    // Whether this file is changed locally and waiting for uploading.
+    pub dirty: bool,
 }
 
 impl InodeAttr {
@@ -51,6 +53,7 @@ impl InodeAttr {
                 } else {
                     Some(item.c_tag.clone().context("Missing c_tag for file")?)
                 },
+                dirty: false,
             })
         }
 
@@ -302,10 +305,14 @@ impl InodePool {
             if new_children.contains_key(new_name.as_str()) {
                 return Err(Error::FileExists);
             }
-            old_children
+            let item_id = old_children
                 .get(old_name.as_str())
                 .ok_or(Error::NotFound)?
-                .clone()
+                .clone();
+            if tree.get(&item_id).unwrap().attr().dirty {
+                return Err(Error::Uploading);
+            }
+            item_id
         };
 
         match onedrive
@@ -346,6 +353,9 @@ impl InodePool {
             let children = tree.get(parent_id).ok_or(Error::NotFound)?.children()?;
             let item_id = children.get(name.as_str()).ok_or(Error::NotFound)?;
             let inode = tree.get(item_id).unwrap();
+            if inode.attr().dirty {
+                return Err(Error::Uploading);
+            }
             if directory && !inode.children()?.is_empty() {
                 return Err(Error::DirectoryNotEmpty);
             }
