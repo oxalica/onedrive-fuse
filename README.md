@@ -32,7 +32,6 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
   - [ ] Write
     - [x] create
     - [x] mkdir
-    - [ ] mknod
     - [x] open
       - [x] O_WRONLY/O_RDWR
       - [x] O_TRUNC
@@ -48,7 +47,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] write
   - [ ] Other
     - destroy
-    - [ ] flush
+    - flush
     - [ ] fsync
     - [ ] fsyncdir
     - [ ] getlk
@@ -59,6 +58,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - getxattr
     - link
     - listxattr
+    - mknod
     - readlink
     - removexattr
     - setxattr
@@ -67,11 +67,9 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
   - [x] Statfs cache
   - [x] Inode attributes (stat) cache
   - [x] Directory tree cache
-    - [x] lookup cache
-    - [x] readdir cache
   - [x] Sync remote changes with local cache
-  - [x] Read cache
-  - [ ] Write cache
+  - [x] File read cache
+  - [x] File write cache/buffer
 
 ## License
 
