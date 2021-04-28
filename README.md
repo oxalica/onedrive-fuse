@@ -42,6 +42,8 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
       - [ ] Move and replace
     - [x] rmdir
     - [ ] setattr
+      - [x] Set size
+      - [ ] Times
     - [x] unlink
     - [x] write
   - [ ] Other

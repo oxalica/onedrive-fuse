@@ -1,5 +1,5 @@
 use crate::login::ManagedOnedrive;
-use onedrive_api::{resource::DriveItem, FileName, OneDrive};
+use onedrive_api::{resource::DriveItem, FileName, ItemLocation, OneDrive};
 use reqwest::Client;
 use serde::Deserialize;
 use std::{
@@ -216,7 +216,7 @@ impl Vfs {
         let item_id = self.id_pool.get_item_id(ino)?;
         let fh = self
             .file_pool
-            .open(&item_id, write, &*self.onedrive().await, &self.client)
+            .open(&item_id, write, self.onedrive.clone(), &self.client)
             .await?;
         log::trace!(target: "vfs::file", "open_file: ino={} fh={}", ino, fh);
         Ok(fh)
@@ -250,7 +250,10 @@ impl Vfs {
         }
         let (fh, item_id, attr) = self
             .file_pool
-            .open_create_empty(&parent_id, child_name, &*self.onedrive().await)
+            .open_create_empty(
+                ItemLocation::child_of_id(&parent_id, child_name),
+                &*self.onedrive().await,
+            )
             .await?;
         self.inode_pool
             .insert_item(parent_id.clone(), child_name, item_id.clone(), attr.clone());
@@ -382,6 +385,25 @@ impl Vfs {
             target: "vfs::file",
             "write_file: ino={} fh={} offset={} len={} updated_attr={:?}",
             ino, fh, offset, data.len(), updated,
+        );
+        Ok(())
+    }
+
+    pub async fn truncate_file(&self, ino: u64, new_size: u64) -> Result<()> {
+        self.write_guard()?;
+        let item_id = self.id_pool.get_item_id(ino)?;
+        self.file_pool
+            .truncate_file(&item_id, new_size, self.onedrive.clone(), &self.client)
+            .await?;
+        self.inode_pool.update_attr(&item_id, |attr| InodeAttr {
+            size: new_size,
+            dirty: true,
+            ..attr
+        });
+        log::trace!(
+            target: "vfs::file",
+            "truncate_file: ino={} id={:?} new_size={}",
+            ino, item_id, new_size,
         );
         Ok(())
     }

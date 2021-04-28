@@ -354,6 +354,42 @@ impl fuse::Filesystem for Filesystem {
             }
         });
     }
+
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<Timespec>,
+        _mtime: Option<Timespec>,
+        _fh: Option<u64>,
+        _crtime: Option<Timespec>,
+        _chgtime: Option<Timespec>,
+        _bkuptime: Option<Timespec>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        self.spawn(|inner| async move {
+            match size {
+                None => {}
+                Some(size) => match inner.vfs.truncate_file(ino, size).await {
+                    Ok(()) => {}
+                    Err(err) => return reply.error(err.into_c_err()),
+                },
+            }
+            match inner.vfs.get_attr(ino).await {
+                Ok((attr, ttl)) => {
+                    let ttl = dur_to_timespec(ttl);
+                    let attr = inner.cvt_attr(ino, attr);
+                    reply.attr(&ttl, &attr)
+                }
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        });
+    }
 }
 
 fn to_blocks_ceil(bytes: u64) -> u64 {

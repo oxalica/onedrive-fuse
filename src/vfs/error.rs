@@ -46,6 +46,8 @@ pub enum Error {
     FileTooLarge,
     #[error("File writing is not supported without disk cache")]
     WriteWithoutCache,
+    #[error("Set file length to which is larger than remote file is not supported")]
+    SetLargerLength,
 
     // Fuse errors.
     // They are hard errors here, since `fuse` should guarantee that they are valid.
@@ -94,7 +96,10 @@ impl Error {
             }
 
             // Not supported
-            Self::NonsequentialRead { .. } | Self::FileTooLarge | Self::WriteWithoutCache => {
+            Self::NonsequentialRead { .. }
+            | Self::FileTooLarge
+            | Self::WriteWithoutCache
+            | Self::SetLargerLength => {
                 log::info!("{}", self);
                 libc::EPERM
             }
