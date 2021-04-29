@@ -43,22 +43,22 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
       - [ ] Times
     - [x] unlink
     - [x] write
-  - [ ] Other
+  - [x] Other
     - destroy
     - flush
     - [x] fsync
     - [x] fsyncdir
-    - [ ] getlk
     - init
-    - [ ] setlk
   - Unsupported
     - bmap
+    - getlk
     - getxattr
     - link
     - listxattr
     - mknod
     - readlink
     - removexattr
+    - setlk
     - setxattr
     - symlink
 - [x] Cache
