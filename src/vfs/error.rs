@@ -32,8 +32,8 @@ pub enum Error {
     ApiDeserializeError(#[from] serde_json::Error),
     #[error("reqwest error: {0}")]
     ReqwestError(#[from] reqwest::Error),
-    #[error("Unexpected end of download stream, read {current_pos}/{file_size}")]
-    UnexpectedEndOfDownload { current_pos: u64, file_size: u64 },
+    #[error("Download failed")]
+    DownloadFailed,
 
     // IO error.
     #[error("IO error: {0}")]
@@ -46,8 +46,6 @@ pub enum Error {
     FileTooLarge,
     #[error("File writing is not supported without disk cache")]
     WriteWithoutCache,
-    #[error("Set file length to which is larger than remote file is not supported")]
-    SetLargerLength,
 
     // Fuse errors.
     // They are hard errors here, since `fuse` should guarantee that they are valid.
@@ -88,18 +86,16 @@ impl Error {
             Self::ApiError(_)
             | Self::ApiDeserializeError(_)
             | Self::ReqwestError(_)
-            | Self::UnexpectedEndOfDownload { .. }
             | Self::IoError(_) => {
                 log::error!("{}", self);
                 log::debug!("{:?}", self);
                 libc::EIO
             }
+            // Already reported.
+            Self::DownloadFailed => libc::EIO,
 
             // Not supported
-            Self::NonsequentialRead { .. }
-            | Self::FileTooLarge
-            | Self::WriteWithoutCache
-            | Self::SetLargerLength => {
+            Self::NonsequentialRead { .. } | Self::FileTooLarge | Self::WriteWithoutCache => {
                 log::info!("{}", self);
                 libc::EPERM
             }

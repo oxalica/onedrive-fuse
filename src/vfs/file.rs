@@ -24,7 +24,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::{mpsc, watch, Mutex},
+    sync::{mpsc, watch, Mutex, MutexGuard},
     time,
 };
 
@@ -138,7 +138,7 @@ impl FilePool {
                 file_size,
                 c_tag,
                 &download_url,
-                false,
+                None,
                 onedrive,
                 self.event_tx.clone(),
                 client,
@@ -215,14 +215,6 @@ impl FilePool {
         onedrive: ManagedOnedrive,
         client: &reqwest::Client,
     ) -> Result<()> {
-        if new_size == 0 {
-            let (fh, _, _) = self
-                .open_create_empty(ItemLocation::from_id(item_id), &*onedrive.get().await)
-                .await?;
-            self.close(fh).await?;
-            return Ok(());
-        }
-
         if new_size > self.config.disk_cache.max_cached_file_size {
             return Err(Error::FileTooLarge);
         }
@@ -233,11 +225,16 @@ impl FilePool {
         if let Some(file) = file {
             let mut guard = file.state.lock().await;
             match guard.status {
-                FileCacheStatus::Downloading { .. } => {
-                    guard.status = FileCacheStatus::Downloading { truncated: true };
+                FileCacheStatus::Downloading { download_size } => {
+                    guard.status = FileCacheStatus::Downloading {
+                        download_size: Some(download_size.unwrap_or(guard.file_size).min(new_size)),
+                    };
                     guard.file_size = new_size;
                     guard.cache_file.set_len(new_size).await.unwrap();
-                    log::debug!("Pending truncate for still downloading file {:?}", item_id);
+                    log::debug!(
+                        "Pending another truncate for still downloading file {:?}",
+                        item_id,
+                    );
                     return Ok(());
                 }
                 FileCacheStatus::Available | FileCacheStatus::Dirty(_) => {
@@ -260,21 +257,24 @@ impl FilePool {
                     ));
                     return Ok(());
                 }
-                FileCacheStatus::Invalidated => {}
+                FileCacheStatus::DownloadFailed | FileCacheStatus::Invalidated => {}
             }
         }
 
-        let (file_size, c_tag, download_url) =
+        let (remote_file_size, c_tag, download_url) =
             Self::fetch_meta(item_id, &*onedrive.get().await).await?;
-        if file_size < new_size {
-            return Err(Error::SetLargerLength);
-        }
+        log::debug!(
+            "Download with truncate {:?}: new size: {}, remote size: {}",
+            item_id,
+            new_size,
+            remote_file_size,
+        );
         match cache.try_alloc_and_fetch(
             item_id,
             new_size,
             c_tag,
             &download_url,
-            true,
+            Some(remote_file_size.min(new_size)),
             onedrive,
             self.event_tx.clone(),
             client,
@@ -300,7 +300,8 @@ impl FilePool {
             .clone();
         match file {
             File::Streaming { file_size, state } => {
-                state.lock().await.read(file_size, offset, size).await
+                let size = (size as u64).min(file_size - offset) as usize;
+                state.lock().await.read(offset, size).await
             }
             File::Cached(state) => FileCache::read(&state, offset, size).await,
         }
@@ -375,7 +376,7 @@ impl FileStreamState {
     }
 
     /// `offset` and `size` must be already clamped.
-    async fn read(&mut self, file_size: u64, offset: u64, size: usize) -> Result<Bytes> {
+    async fn read(&mut self, offset: u64, size: usize) -> Result<Bytes> {
         if offset != self.current_pos {
             return Err(Error::NonsequentialRead {
                 current_pos: self.current_pos,
@@ -411,10 +412,7 @@ impl FileStreamState {
         if ret_buf.len() == size {
             Ok(ret_buf.into())
         } else {
-            Err(Error::UnexpectedEndOfDownload {
-                current_pos: self.current_pos,
-                file_size,
-            })
+            Err(Error::DownloadFailed)
         }
     }
 }
@@ -516,7 +514,7 @@ impl DiskCache {
         file_size: u64,
         c_tag: Tag,
         download_url: &str,
-        truncated: bool,
+        download_size: Option<u64>,
         onedrive: ManagedOnedrive,
         event_tx: mpsc::Sender<UpdateEvent>,
         client: &reqwest::Client,
@@ -550,13 +548,13 @@ impl DiskCache {
             item_id.clone(),
             file_size,
             c_tag,
-            FileCacheStatus::Downloading { truncated },
+            FileCacheStatus::Downloading { download_size },
             cache_file.into(),
             &self.total_size,
         );
         cache.insert(item_id.clone(), file.clone());
         tokio::spawn(FileCache::write_to_cache_thread(
-            Arc::downgrade(&file),
+            file.clone(),
             chunk_rx,
             pos_tx,
             onedrive,
@@ -647,8 +645,13 @@ struct FileCacheState {
 
 #[derive(Debug)]
 enum FileCacheStatus {
-    /// File is downloading. `mtime` indicates the file is truncated when downloading.
-    Downloading { truncated: bool },
+    /// File is downloading.
+    ///
+    /// If `download_size` is not None, there is a pending `set_len` and
+    /// the underlying file is already set to expected length.
+    Downloading { download_size: Option<u64> },
+    /// Download failed.
+    DownloadFailed,
     /// File is downloaded or created, and is synchronized with remote side.
     Available,
     /// File is downloaded or created, and is uploading or waiting for uploading.
@@ -684,7 +687,7 @@ impl FileCache {
     }
 
     async fn write_to_cache_thread(
-        this: Weak<FileCache>,
+        this: Arc<FileCache>,
         mut chunk_rx: mpsc::Receiver<Bytes>,
         pos_tx: watch::Sender<u64>,
         onedrive: ManagedOnedrive,
@@ -692,73 +695,114 @@ impl FileCache {
         upload_config: UploadConfig,
     ) {
         let mut pos = 0u64;
-        while let Some(mut chunk) = chunk_rx.recv().await {
-            let file = match this.upgrade() {
-                Some(file) => file,
-                None => return,
-            };
 
-            let mut guard = file.state.lock().await;
-            let truncated = match guard.status {
-                FileCacheStatus::Downloading { truncated } => truncated,
-                FileCacheStatus::Invalidated => return,
-                FileCacheStatus::Available | FileCacheStatus::Dirty(_) => unreachable!(),
+        let complete = |mut guard: MutexGuard<'_, FileCacheState>, download_size: u64| {
+            log::debug!(
+                "Cache {:?} is fully available (downloaded {} bytes, total {} bytes)",
+                this.item_id,
+                download_size,
+                guard.file_size,
+            );
+
+            let dirty = matches!(
+                guard.status,
+                FileCacheStatus::Downloading {
+                    download_size: Some(_)
+                }
+            );
+            if dirty {
+                log::debug!(
+                    "Pending upload for truncated file {:?}, size: {}",
+                    this.item_id,
+                    guard.file_size,
+                );
+                let lock_mtime = Instant::now();
+                guard.status = FileCacheStatus::Dirty(lock_mtime);
+                tokio::spawn(Self::upload_thread(
+                    this.clone(),
+                    onedrive,
+                    lock_mtime,
+                    event_tx,
+                    upload_config,
+                ));
+            } else {
+                guard.status = FileCacheStatus::Available;
+            }
+        };
+
+        while let Some(mut chunk) = chunk_rx.recv().await {
+            let mut guard = this.state.lock().await;
+            let download_size = match guard.status {
+                FileCacheStatus::Downloading {
+                    download_size: Some(download_size),
+                } => download_size,
+                // If there is no pending set_len, download should be aborted when removed from cache.
+                FileCacheStatus::Downloading {
+                    download_size: None,
+                } if Arc::strong_count(&this) != 1 => guard.file_size,
+                FileCacheStatus::Downloading { .. } | FileCacheStatus::Invalidated => return,
+                FileCacheStatus::DownloadFailed { .. }
+                | FileCacheStatus::Available
+                | FileCacheStatus::Dirty(_) => unreachable!(),
             };
+            assert!(download_size <= guard.file_size);
 
             // Truncate extra data if `set_len` is called.
-            let rest_len = guard.file_size.saturating_sub(pos);
+            let rest_len = download_size.saturating_sub(pos);
             if rest_len < chunk.len() as u64 {
-                assert!(truncated);
                 chunk.truncate(rest_len as usize);
             }
 
-            if rest_len != 0 {
+            if !chunk.is_empty() {
                 guard.cache_file.seek(SeekFrom::Start(pos)).await.unwrap();
                 guard.cache_file.write_all(&chunk).await.unwrap();
-
                 pos += chunk.len() as u64;
-                log::trace!(
-                    "Write {} bytes to cache {:?}, current pos: {}, total size: {}",
-                    chunk.len(),
-                    file.item_id,
-                    pos,
-                    guard.file_size,
-                );
-            } else {
-                // `pos` may already go beyond current file size. Do a truncate.
-                pos = guard.file_size;
             }
+            log::trace!(
+                "Write {} bytes to cache {:?}, current pos: {}, total need download: {}, file size: {}",
+                chunk.len(),
+                this.item_id,
+                pos,
+                download_size,
+                guard.file_size,
+            );
 
-            // We are holding `state`.
-            pos_tx.send(pos).unwrap();
+            if pos < download_size {
+                // We are holding `state`.
+                pos_tx.send(pos).unwrap();
+            } else {
+                // We are holding `state`.
+                // The file size may be larger then download size due to set_len.
+                // Space after data written is already zero as expected.
+                pos_tx.send(guard.file_size).unwrap();
 
-            assert!(pos <= guard.file_size, "File length mismatch");
-            if pos == guard.file_size {
-                log::debug!(
-                    "Cache {:?} is fully available ({} bytes)",
-                    file.item_id,
-                    guard.file_size,
-                );
-                if truncated {
-                    log::debug!(
-                        "Resume pending truncate for {:?}, size: {}",
-                        file.item_id,
-                        guard.file_size,
-                    );
-                    let lock_mtime = Instant::now();
-                    guard.status = FileCacheStatus::Dirty(lock_mtime);
-                    tokio::spawn(Self::upload_thread(
-                        file.clone(),
-                        onedrive,
-                        lock_mtime,
-                        event_tx,
-                        upload_config,
-                    ));
-                } else {
-                    guard.status = FileCacheStatus::Available
-                }
+                complete(guard, download_size);
                 return;
             }
+        }
+
+        let mut guard = this.state.lock().await;
+        let download_size = match guard.status {
+            FileCacheStatus::Downloading { download_size } => {
+                download_size.unwrap_or(guard.file_size)
+            }
+            FileCacheStatus::Invalidated => return,
+            FileCacheStatus::DownloadFailed { .. }
+            | FileCacheStatus::Available
+            | FileCacheStatus::Dirty(_) => unreachable!(),
+        };
+
+        if pos < download_size {
+            log::error!(
+                "Download failed of {:?}, got {}/{}",
+                this.item_id,
+                pos,
+                download_size,
+            );
+            guard.status = FileCacheStatus::DownloadFailed;
+        } else {
+            // File is set to a larger length than remote side.
+            complete(guard, download_size);
         }
     }
 
@@ -768,11 +812,12 @@ impl FileCache {
         if file_size <= offset || size == 0 {
             return Ok(Bytes::new());
         }
-        let end = file_size.min(offset + size as u64);
+        let end = offset + size as u64;
 
         match guard.status {
             FileCacheStatus::Available | FileCacheStatus::Dirty(_) => {}
             FileCacheStatus::Invalidated => return Err(Error::Invalidated),
+            FileCacheStatus::DownloadFailed => return Err(Error::DownloadFailed),
             FileCacheStatus::Downloading { .. } if end <= *guard.available_size.borrow() => {}
             FileCacheStatus::Downloading { .. } => {
                 let mut rx = guard.available_size.clone();
@@ -782,20 +827,17 @@ impl FileCache {
 
                 guard = this.state.lock().await;
                 match guard.status {
-                    FileCacheStatus::Available | FileCacheStatus::Dirty(_) => {}
                     FileCacheStatus::Invalidated => return Err(Error::Invalidated),
-                    FileCacheStatus::Downloading { .. } => {
-                        let available = *rx.borrow();
-                        if available < end {
-                            return Err(Error::UnexpectedEndOfDownload {
-                                current_pos: available,
-                                file_size: guard.file_size,
-                            });
-                        }
-                    }
+                    FileCacheStatus::DownloadFailed => return Err(Error::DownloadFailed),
+                    FileCacheStatus::Available
+                    | FileCacheStatus::Dirty(_)
+                    | FileCacheStatus::Downloading { .. } => {}
                 }
             }
         }
+
+        // File size should be retrive after waiting since it may change.
+        let end = end.min(guard.file_size);
 
         let mut buf = vec![0u8; (end - offset) as usize];
         guard
@@ -822,6 +864,7 @@ impl FileCache {
         match guard.status {
             FileCacheStatus::Available | FileCacheStatus::Dirty(_) => {}
             FileCacheStatus::Invalidated => return Err(Error::Invalidated),
+            FileCacheStatus::DownloadFailed => return Err(Error::DownloadFailed),
             FileCacheStatus::Downloading { .. } => {
                 let mut rx = guard.available_size.clone();
                 drop(guard);
@@ -831,17 +874,18 @@ impl FileCache {
             }
         }
 
-        let mtime = Instant::now();
+        let lock_mtime = Instant::now();
         let mtime_sys = SystemTime::now();
         match guard.status {
-            FileCacheStatus::Downloading { .. } => unreachable!(),
             FileCacheStatus::Invalidated => return Err(Error::Invalidated),
+            FileCacheStatus::DownloadFailed => return Err(Error::DownloadFailed),
+            FileCacheStatus::Downloading { .. } => unreachable!(),
             FileCacheStatus::Dirty(_) | FileCacheStatus::Available => {
-                guard.status = FileCacheStatus::Dirty(mtime);
+                guard.status = FileCacheStatus::Dirty(lock_mtime);
                 tokio::spawn(Self::upload_thread(
                     this.clone(),
                     onedrive,
-                    mtime,
+                    lock_mtime,
                     event_tx.clone(),
                     config,
                 ));
