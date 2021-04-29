@@ -7,8 +7,9 @@ use crate::{
 use bytes::Bytes;
 use lru_cache::LruCache;
 use onedrive_api::{
+    option::DriveItemPutOption,
     resource::{DriveItem, DriveItemField},
-    ItemId, ItemLocation, OneDrive, Tag,
+    ConflictBehavior, ItemId, ItemLocation, OneDrive, Tag,
 };
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
@@ -247,6 +248,7 @@ impl FilePool {
                     guard.cache_file.set_len(new_size).await.unwrap();
                     file.queue_upload(
                         &mut guard,
+                        mtime,
                         onedrive,
                         self.event_tx.clone(),
                         self.config.upload.clone(),
@@ -751,19 +753,22 @@ impl FileCache {
                 guard.file_size,
             );
 
-            let dirty = matches!(
-                guard.status,
-                FileCacheStatus::Downloading { truncate: Some(_) },
-            );
-            if dirty {
-                log::debug!(
-                    "Pending upload for truncated file {:?}, size: {}",
-                    this.item_id,
-                    guard.file_size,
-                );
-                this.queue_upload(&mut guard, onedrive, event_tx, upload_config);
-            } else {
-                guard.status = FileCacheStatus::Available;
+            match guard.status {
+                FileCacheStatus::Downloading {
+                    truncate: Some((_, mtime)),
+                } => {
+                    log::debug!(
+                        "Pending upload for truncated file {:?}, size: {}, mtime: {}",
+                        this.item_id,
+                        guard.file_size,
+                        humantime::format_rfc3339_seconds(mtime),
+                    );
+                    this.queue_upload(&mut guard, mtime, onedrive, event_tx, upload_config);
+                }
+                FileCacheStatus::Downloading { truncate: None } => {
+                    guard.status = FileCacheStatus::Available;
+                }
+                _ => unreachable!(),
             }
         };
 
@@ -913,13 +918,13 @@ impl FileCache {
             }
         }
 
-        let mtime_sys = SystemTime::now();
+        let mtime = SystemTime::now();
         match guard.status {
             FileCacheStatus::Invalidated => return Err(Error::Invalidated),
             FileCacheStatus::DownloadFailed => return Err(Error::DownloadFailed),
             FileCacheStatus::Downloading { .. } => unreachable!(),
             FileCacheStatus::Dirty { .. } | FileCacheStatus::Available => {
-                this.queue_upload(&mut guard, onedrive, event_tx.clone(), config);
+                this.queue_upload(&mut guard, mtime, onedrive, event_tx.clone(), config);
             }
         }
 
@@ -947,7 +952,7 @@ impl FileCache {
         Ok(UpdatedFileAttr {
             item_id: this.item_id.clone(),
             size: new_size,
-            mtime: mtime_sys,
+            mtime,
             c_tag: None,
         })
     }
@@ -955,10 +960,16 @@ impl FileCache {
     fn queue_upload(
         self: &Arc<Self>,
         guard: &mut MutexGuard<'_, FileCacheState>,
+        mtime: SystemTime,
         onedrive: ManagedOnedrive,
         event_tx: mpsc::Sender<UpdateEvent>,
         config: UploadConfig,
     ) {
+        const UPLOAD_PART_SIZE: usize = 10 << 20;
+        static_assertions::const_assert!(
+            UPLOAD_PART_SIZE <= onedrive_api::UploadSession::MAX_PART_SIZE,
+        );
+
         let (flush_tx, flush_rx) = oneshot::channel();
         let (done_tx, done_rx) = watch::channel(false);
         let init_lock_mtime = Instant::now();
@@ -972,38 +983,42 @@ impl FileCache {
         tokio::spawn(async move {
             let _ = time::timeout(config.flush_delay, flush_rx).await;
 
+            let is_up_to_date = |status: &FileCacheStatus| matches!(status, FileCacheStatus::Dirty { lock_mtime, .. } if *lock_mtime == init_lock_mtime);
+
             loop {
                 // Check not changed since last lock.
-                let data = {
-                    let mut guard = this.state.lock().await;
-                    match guard.status {
-                        FileCacheStatus::Dirty { lock_mtime, .. }
-                            if lock_mtime == init_lock_mtime =>
-                        {
-                            let mut buf = vec![0u8; guard.file_size as usize];
-                            guard.cache_file.seek(SeekFrom::Start(0)).await.unwrap();
-                            guard.cache_file.read_exact(&mut buf).await.unwrap();
-                            buf
-                        }
-                        _ => return,
+                let file_size = {
+                    let guard = this.state.lock().await;
+                    if !is_up_to_date(&guard.status) {
+                        return;
                     }
+                    guard.file_size
                 };
-                let file_len = data.len();
 
-                // Do upload.
-                log::info!("Uploading {:?} ({} B)", this.item_id, file_len);
-                let item = match onedrive
+                let client = onedrive.get().await.client().clone();
+
+                // Create upload session.
+                log::info!("Uploading {:?} ({} B)", this.item_id, file_size);
+                let mut initial = DriveItem::default();
+                initial.file_system_info = Some(Box::new(serde_json::json!({
+                    "lastModifiedDateTime": humantime::format_rfc3339_seconds(mtime).to_string(),
+                })));
+                let sess = match onedrive
                     .get()
                     .await
-                    .upload_small(ItemLocation::from_id(&this.item_id), data)
+                    .new_upload_session_with_initial_option(
+                        ItemLocation::from_id(&this.item_id),
+                        &initial,
+                        DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Replace),
+                    )
                     .await
                 {
-                    Ok(item) => item,
+                    Ok((sess, _)) => sess,
                     Err(err) => {
                         log::error!(
-                            "Failed to upload {:?} ({} B): {}",
+                            "Failed to create upload session of {:?} ({} B), retrying: {}",
                             this.item_id,
-                            file_len,
+                            file_size,
                             err,
                         );
                         // Retry
@@ -1012,14 +1027,73 @@ impl FileCache {
                     }
                 };
 
+                // Upload parts.
+                let mut pos = 0u64;
+                let mut buf = vec![0u8; UPLOAD_PART_SIZE];
+                let item = loop {
+                    let end = file_size.min(pos + UPLOAD_PART_SIZE as u64);
+                    let len = (end - pos) as usize;
+                    {
+                        let mut guard = this.state.lock().await;
+                        if !is_up_to_date(&guard.status) {
+                            log::debug!("Upload session of {:?} outdates", this.item_id);
+                            if let Err(err) = sess.delete(&client).await {
+                                log::error!(
+                                    "Failed to delete outdated upload session of {:?}: {}",
+                                    this.item_id,
+                                    err,
+                                );
+                            }
+                            return;
+                        }
+                        assert_eq!(file_size, guard.file_size, "Truncation restarts uploading");
+                        guard.cache_file.seek(SeekFrom::Start(pos)).await.unwrap();
+                        guard.cache_file.read_exact(&mut buf[..len]).await.unwrap();
+                    }
+
+                    match sess
+                        .upload_part(buf[..len].to_owned(), pos..end, file_size, &client)
+                        .await
+                    {
+                        Ok(None) => {
+                            assert_ne!(end, file_size);
+                            log::debug!(
+                                "Uploaded part {}..{}/{} of file {:?}",
+                                pos,
+                                end,
+                                file_size,
+                                this.item_id,
+                            );
+                            pos = end;
+                        }
+                        Ok(Some(item)) => {
+                            assert_eq!(end, file_size);
+                            break item;
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "Failed to upload part {}..{}/{} of file {:?}, retrying: {}",
+                                pos,
+                                end,
+                                file_size,
+                                this.item_id,
+                                err,
+                            );
+                            // Retry
+                            time::sleep(config.retry_delay).await;
+                            continue;
+                        }
+                    }
+                };
+
                 let attr = super::InodeAttr::parse_item(&item).expect("Invalid attrs");
                 assert_eq!(item.id.as_ref(), Some(&this.item_id));
-                assert_eq!(attr.size, file_len as u64);
+                assert_eq!(attr.size, file_size);
                 let c_tag = item.c_tag.expect("Missing c_tag");
                 log::info!(
                     "Uploaded {:?} ({} B), new c_tag: {:?}",
                     this.item_id,
-                    file_len,
+                    file_size,
                     c_tag,
                 );
 
@@ -1033,10 +1107,10 @@ impl FileCache {
                             guard.status = FileCacheStatus::Available;
                         }
                         FileCacheStatus::Invalidated => {
-                            log::info!(
-                            "Cache invalidated during the upload of {:?}, maybe both changed? Suppress update event",
-                            this.item_id,
-                        );
+                            log::warn!(
+                                "Cache invalidated during the upload of {:?}, maybe both changed? Suppress update event",
+                                this.item_id,
+                            );
                             return;
                         }
                         // Race another upload.

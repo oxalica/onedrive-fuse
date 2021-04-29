@@ -662,9 +662,9 @@ dependencies = [
 
 [[package]]
 name = "onedrive-api"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5efd8a97a2fa951d93b1cf2fd3027f9638aec1202223a0bad7e109c48e713d6b"
+checksum = "25af90f4c8cd14d525ffa1b7f0095555968c5e1792c240e623da3f6ab66d060e"
 dependencies = [
  "bytes",
  "reqwest",
