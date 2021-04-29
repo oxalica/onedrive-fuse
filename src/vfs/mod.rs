@@ -6,7 +6,7 @@ use std::{
     ffi::OsStr,
     ops::Deref,
     sync::{Arc, Weak},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -397,23 +397,55 @@ impl Vfs {
         Ok(())
     }
 
-    pub async fn truncate_file(&self, ino: u64, new_size: u64) -> Result<()> {
+    pub async fn set_attr(
+        &self,
+        ino: u64,
+        size: Option<u64>,
+        mtime: Option<SystemTime>,
+    ) -> Result<(InodeAttr, Duration)> {
         self.write_guard()?;
         let item_id = self.id_pool.get_item_id(ino)?;
-        self.file_pool
-            .truncate_file(&item_id, new_size, self.onedrive.clone(), &self.client)
-            .await?;
-        self.inode_pool.update_attr(&item_id, |attr| InodeAttr {
-            size: new_size,
-            dirty: true,
-            ..attr
-        });
+        let old_attr = self.inode_pool.get_attr(&item_id)?;
+        if size.is_some() && old_attr.is_directory {
+            return Err(Error::IsADirectory);
+        }
+
+        let new_attr = match (size, mtime) {
+            // Truncate.
+            (Some(new_size), _) if old_attr.size != new_size => {
+                let mtime = mtime.unwrap_or_else(SystemTime::now);
+                self.file_pool
+                    .truncate_file(
+                        &item_id,
+                        new_size,
+                        mtime,
+                        self.onedrive.clone(),
+                        &self.client,
+                    )
+                    .await?;
+                self.inode_pool.update_attr(&item_id, |attr| InodeAttr {
+                    dirty: true,
+                    size: new_size,
+                    mtime,
+                    ..attr
+                })
+            }
+            // Touch mtime
+            (_, Some(mtime)) => {
+                self.inode_pool
+                    .set_time(&item_id, mtime, &*self.onedrive().await)
+                    .await?
+            }
+            // Do nothing.
+            (_, None) => self.inode_pool.get_attr(&item_id)?,
+        };
+
         log::trace!(
             target: "vfs::file",
-            "truncate_file: ino={} id={:?} new_size={}",
-            ino, item_id, new_size,
+            "truncate_file: ino={} id={:?} new_size={:?} new_mtime={:?} ret_attr={:?}",
+            ino, item_id, size, mtime, new_attr,
         );
-        Ok(())
+        Ok((new_attr, self.ttl()))
     }
 
     pub async fn sync_file(&self, ino: u64) -> Result<()> {

@@ -364,7 +364,7 @@ impl fuse::Filesystem for Filesystem {
         _gid: Option<u32>,
         size: Option<u64>,
         _atime: Option<Timespec>,
-        _mtime: Option<Timespec>,
+        mtime: Option<Timespec>,
         _fh: Option<u64>,
         _crtime: Option<Timespec>,
         _chgtime: Option<Timespec>,
@@ -373,14 +373,8 @@ impl fuse::Filesystem for Filesystem {
         reply: ReplyAttr,
     ) {
         self.spawn(|inner| async move {
-            match size {
-                None => {}
-                Some(size) => match inner.vfs.truncate_file(ino, size).await {
-                    Ok(()) => {}
-                    Err(err) => return reply.error(err.into_c_err()),
-                },
-            }
-            match inner.vfs.get_attr(ino).await {
+            let mtime = mtime.map(timespec_to_time);
+            match inner.vfs.set_attr(ino, size, mtime).await {
                 Ok((attr, ttl)) => {
                     let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
@@ -427,4 +421,8 @@ fn dur_to_timespec(dur: Duration) -> Timespec {
 
 fn time_to_timespec(t: SystemTime) -> Timespec {
     dur_to_timespec(t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
+}
+
+fn timespec_to_time(t: Timespec) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::new(t.sec as u64, t.nsec as u32)
 }

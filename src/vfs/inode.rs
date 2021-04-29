@@ -3,7 +3,7 @@ use crate::vfs::error::{Error, Result};
 use http::StatusCode;
 use indexmap::IndexMap;
 use onedrive_api::{
-    option::DriveItemPutOption,
+    option::{DriveItemPutOption, ObjectOption},
     resource::{DriveItem, DriveItemField},
     ConflictBehavior, FileName, ItemId, ItemLocation, OneDrive, Tag,
 };
@@ -394,12 +394,17 @@ impl InodePool {
         Ok(())
     }
 
-    /// Update attribute of an item.
-    pub fn update_attr(&self, item_id: &ItemId, f: impl FnOnce(InodeAttr) -> InodeAttr) {
+    /// Update attribute of an item. Return updated attribute.
+    pub fn update_attr(
+        &self,
+        item_id: &ItemId,
+        f: impl FnOnce(InodeAttr) -> InodeAttr,
+    ) -> InodeAttr {
         let mut tree = self.tree.lock().unwrap();
         let inode = tree.get_mut(item_id).unwrap();
-        let attr = inode.attr().clone();
-        inode.set_attr(f(attr));
+        let old_attr = inode.attr().clone();
+        inode.set_attr(f(old_attr));
+        inode.attr().clone()
     }
 
     /// Insert a new item to a directory.
@@ -413,6 +418,34 @@ impl InodePool {
         let mut tree = self.tree.lock().unwrap();
         tree.insert_item(child_id.clone(), child_attr);
         tree.set_parent(&child_id, Some((parent_id, child_name.as_str().to_owned())))
+    }
+
+    /// `item_id` should be already checked to be in cache.
+    pub async fn set_time(
+        &self,
+        item_id: &ItemId,
+        mtime: SystemTime,
+        onedrive: &OneDrive,
+    ) -> Result<InodeAttr> {
+        let opt = ObjectOption::new().select(Self::SYNC_SELECT_FIELDS);
+        let mut patch = DriveItem::default();
+
+        patch.file_system_info = Some(Box::new(serde_json::json!({
+            "lastModifiedDateTime": humantime::format_rfc3339_seconds(mtime).to_string(),
+        })));
+        let item = onedrive
+            .update_item_with_option(ItemLocation::from_id(item_id), &patch, opt)
+            .await?;
+        let attr = InodeAttr::parse_item(&item).expect("Invalid attr");
+        log::debug!(
+            "Set attribute of {:?}: mtime -> {}",
+            item_id,
+            humantime::format_rfc3339_seconds(mtime),
+        );
+
+        let mut tree = self.tree.lock().unwrap();
+        tree.get_mut(&item_id).unwrap().set_attr(attr.clone());
+        Ok(attr)
     }
 
     /// Sync item changes from remote. Items not in cache are skipped.

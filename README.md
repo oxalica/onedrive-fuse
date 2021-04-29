@@ -15,7 +15,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
 
 ## Features implemented
 
-- [ ] FUSE syscalls
+- [x] FUSE syscalls
   - [x] Read
     - [x] access
     - [x] forget
@@ -29,7 +29,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - [x] release
     - [x] releasedir
     - [x] statfs
-  - [ ] Write
+  - [x] Write
     - [x] create
     - [x] mkdir
     - [x] open
@@ -38,9 +38,9 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
       - [x] O_EXCL
     - [x] rename
     - [x] rmdir
-    - [ ] setattr
-      - [x] Set size
-      - [ ] Times
+    - [x] setattr
+      - [x] size
+      - [x] mtime
     - [x] unlink
     - [x] write
   - [x] Other

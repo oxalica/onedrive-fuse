@@ -209,6 +209,7 @@ impl FilePool {
         &self,
         item_id: &ItemId,
         new_size: u64,
+        mtime: SystemTime,
         onedrive: ManagedOnedrive,
         client: &reqwest::Client,
     ) -> Result<()> {
@@ -222,9 +223,10 @@ impl FilePool {
         if let Some(file) = file {
             let mut guard = file.state.lock().await;
             match guard.status {
-                FileCacheStatus::Downloading { download_size } => {
+                FileCacheStatus::Downloading { truncate } => {
+                    let download_size = truncate.map(|(sz, _)| sz).unwrap_or(guard.file_size);
                     guard.status = FileCacheStatus::Downloading {
-                        download_size: Some(download_size.unwrap_or(guard.file_size).min(new_size)),
+                        truncate: Some((download_size.min(new_size), mtime)),
                     };
                     guard.file_size = new_size;
                     guard.cache_file.set_len(new_size).await.unwrap();
@@ -268,7 +270,7 @@ impl FilePool {
             new_size,
             c_tag,
             &download_url,
-            Some(remote_file_size.min(new_size)),
+            Some((remote_file_size.min(new_size), mtime)),
             onedrive,
             self.event_tx.clone(),
             client,
@@ -548,7 +550,7 @@ impl DiskCache {
         file_size: u64,
         c_tag: Tag,
         download_url: &str,
-        download_size: Option<u64>,
+        truncate: Option<(u64, SystemTime)>,
         onedrive: ManagedOnedrive,
         event_tx: mpsc::Sender<UpdateEvent>,
         client: &reqwest::Client,
@@ -582,7 +584,7 @@ impl DiskCache {
             item_id.clone(),
             file_size,
             c_tag,
-            FileCacheStatus::Downloading { download_size },
+            FileCacheStatus::Downloading { truncate },
             cache_file.into(),
             &self.total_size,
         );
@@ -688,9 +690,8 @@ struct FileCacheState {
 enum FileCacheStatus {
     /// File is downloading.
     ///
-    /// If `download_size` is not None, there is a pending `set_len` and
-    /// the underlying file is already set to expected length.
-    Downloading { download_size: Option<u64> },
+    /// `truncate` is `Some(download_size, truncate_mtime)` if there is a pending truncation.
+    Downloading { truncate: Option<(u64, SystemTime)> },
     /// Download failed.
     DownloadFailed,
     /// File is downloaded or created, and is synchronized with remote side.
@@ -752,9 +753,7 @@ impl FileCache {
 
             let dirty = matches!(
                 guard.status,
-                FileCacheStatus::Downloading {
-                    download_size: Some(_)
-                }
+                FileCacheStatus::Downloading { truncate: Some(_) },
             );
             if dirty {
                 log::debug!(
@@ -772,12 +771,14 @@ impl FileCache {
             let mut guard = this.state.lock().await;
             let download_size = match guard.status {
                 FileCacheStatus::Downloading {
-                    download_size: Some(download_size),
+                    truncate: Some((download_size, _)),
                 } => download_size,
                 // If there is no pending set_len, download should be aborted when removed from cache.
-                FileCacheStatus::Downloading {
-                    download_size: None,
-                } if Arc::strong_count(&this) != 1 => guard.file_size,
+                FileCacheStatus::Downloading { truncate: None }
+                    if Arc::strong_count(&this) != 1 =>
+                {
+                    guard.file_size
+                }
                 FileCacheStatus::Downloading { .. } | FileCacheStatus::Invalidated => return,
                 FileCacheStatus::DownloadFailed { .. }
                 | FileCacheStatus::Available
@@ -821,8 +822,8 @@ impl FileCache {
 
         let mut guard = this.state.lock().await;
         let download_size = match guard.status {
-            FileCacheStatus::Downloading { download_size } => {
-                download_size.unwrap_or(guard.file_size)
+            FileCacheStatus::Downloading { truncate } => {
+                truncate.map(|(sz, _)| sz).unwrap_or(guard.file_size)
             }
             FileCacheStatus::Invalidated => return,
             FileCacheStatus::DownloadFailed { .. }
