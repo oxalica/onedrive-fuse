@@ -48,8 +48,8 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
   - [ ] Other
     - destroy
     - flush
-    - [ ] fsync
-    - [ ] fsyncdir
+    - [x] fsync
+    - [x] fsyncdir
     - [ ] getlk
     - init
     - [ ] setlk
@@ -63,7 +63,7 @@ Mount your [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     - removexattr
     - setxattr
     - symlink
-- [ ] Cache
+- [x] Cache
   - [x] Statfs cache
   - [x] Inode attributes (stat) cache
   - [x] Directory tree cache

@@ -407,6 +407,20 @@ impl Vfs {
         );
         Ok(())
     }
+
+    pub async fn sync_file(&self, ino: u64) -> Result<()> {
+        if self.readonly {
+            return Ok(());
+        }
+        let item_id = self.id_pool.get_item_id(ino)?;
+        self.file_pool.flush_file(&item_id).await?;
+        log::trace!(
+            target: "vfs::file",
+            "sync_file: ino={} id={:?}",
+            ino, item_id,
+        );
+        Ok(())
+    }
 }
 
 fn cvt_filename(name: &OsStr) -> Result<&FileName> {

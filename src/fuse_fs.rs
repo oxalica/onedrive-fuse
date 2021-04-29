@@ -390,6 +390,27 @@ impl fuse::Filesystem for Filesystem {
             }
         });
     }
+
+    fn fsyncdir(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        _fh: u64,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        // Currently we don't delay inode changes, so this is trivial.
+        reply.ok();
+    }
+
+    fn fsync(&mut self, _req: &Request, ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        self.spawn(|inner| async move {
+            match inner.vfs.sync_file(ino).await {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(err.into_c_err()),
+            }
+        });
+    }
 }
 
 fn to_blocks_ceil(bytes: u64) -> u64 {
