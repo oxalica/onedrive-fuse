@@ -1,6 +1,7 @@
 use crate::{
     config::de_duration_sec,
     login::ManagedOnedrive,
+    paths::default_disk_cache_dir,
     vfs::{Error, Result, UpdateEvent},
 };
 use bytes::Bytes;
@@ -62,10 +63,6 @@ struct UploadConfig {
     flush_delay: Duration,
     #[serde(deserialize_with = "de_duration_sec")]
     retry_delay: Duration,
-}
-
-fn default_disk_cache_dir() -> PathBuf {
-    std::env::temp_dir().join("onedrive_fuse-cache")
 }
 
 pub struct FilePool {

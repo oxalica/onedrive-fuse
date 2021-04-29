@@ -36,8 +36,9 @@ impl ManagedOnedrive {
         mount_readonly: bool,
     ) -> Result<Self> {
         log::info!("Logining...");
-        let mut cred = Credential::load(&credential_file)
-            .context("Invalid credential file. Try to re-login.")?;
+        let mut cred = Credential::load(&credential_file).context(
+            "Missing or invalid credential file. Please try to re-login with `onedrive-fuse login`.",
+        )?;
         ensure!(
             !cred.readonly || mount_readonly,
             "Cannot mount as read-write using read-only token. Please re-login to grant read-write permission.",

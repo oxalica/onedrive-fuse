@@ -8,6 +8,7 @@ use structopt::StructOpt;
 mod config;
 mod fuse_fs;
 mod login;
+mod paths;
 mod vfs;
 
 #[tokio::main]
@@ -33,7 +34,7 @@ const REDIRECT_URI: &str = "https://login.microsoftonline.com/common/oauth2/nati
 async fn main_login(opt: OptLogin) -> Result<()> {
     let credential_path = opt
         .credential
-        .or_else(default_credential_path)
+        .or_else(paths::default_credential_path)
         .context("No credential file provided to save to")?;
 
     let auth = Auth::new(
@@ -99,7 +100,7 @@ whose URL contains `nativeclient?code=`.
 async fn main_mount(opt: OptMount) -> Result<()> {
     let credential_path = opt
         .credential
-        .or_else(default_credential_path)
+        .or_else(paths::default_credential_path)
         .context("No credential file provided")?;
 
     let config = config::Config::merge_from_default(opt.config.as_deref(), &opt.option)?;
@@ -191,11 +192,4 @@ struct OptMount {
     /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
     #[structopt(short, long)]
     option: Vec<String>,
-}
-
-fn default_credential_path() -> Option<PathBuf> {
-    let mut path = PathBuf::from(env::var("HOME").ok()?);
-    path.push(".onedrive_fuse");
-    path.push("credential.json");
-    Some(path)
 }
