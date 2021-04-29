@@ -320,7 +320,8 @@ impl Vfs {
         let new_name = cvt_filename(new_name)?;
         let parent_id = self.id_pool.get_item_id(parent_ino)?;
         let new_parent_id = self.id_pool.get_item_id(new_parent_ino)?;
-        self.inode_pool
+        let replaced_item_id = self
+            .inode_pool
             .rename(
                 &parent_id,
                 name,
@@ -329,6 +330,13 @@ impl Vfs {
                 &*self.onedrive().await,
             )
             .await?;
+        // If some item is replace, remove it from cache.
+        if let Some(id) = replaced_item_id {
+            let mut mock_item = DriveItem::default();
+            mock_item.id = Some(id);
+            mock_item.deleted = Some(Box::new(serde_json::Value::Null));
+            self.file_pool.sync_items(&[mock_item]).await;
+        }
         log::trace!(
             target: "vfs::dir",
             "rename: parent_id={:?} parent_ino={} name={} new_parent_id={:?} new_parent_ino={} new_name={}",

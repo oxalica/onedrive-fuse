@@ -631,15 +631,22 @@ impl DiskCache {
         {
             let mut cache = self.cache.lock().unwrap();
             for item in items {
-                if item.folder.is_some() || item.deleted.is_some() {
+                if item.folder.is_some() {
                     continue;
                 }
+
                 let id = item.id.clone().expect("Missing id");
-                let c_tag = item.c_tag.clone().expect("Missing c_tag");
                 let file = match cache.get_mut(&id) {
                     Some(file) => file,
                     None => continue,
                 };
+                if item.deleted.is_some() {
+                    log::debug!("Cached file {:?} is deleted", file.item_id);
+                    outdated.push(cache.remove(&id).unwrap());
+                    continue;
+                }
+
+                let c_tag = item.c_tag.clone().expect("Missing c_tag");
                 let old_c_tag = file.c_tag.lock().unwrap();
                 if *old_c_tag == c_tag {
                     log::debug!("Cached file {:?} is still up-to-date", *old_c_tag);

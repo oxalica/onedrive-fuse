@@ -297,13 +297,21 @@ impl InodePool {
         new_parent_id: &ItemId,
         new_name: &FileName,
         onedrive: &OneDrive,
-    ) -> Result<()> {
+    ) -> Result<Option<ItemId>> {
+        let mut replaced_item_id = None;
         let item_id = {
             let tree = self.tree.lock().unwrap();
             let old_children = tree.get(old_parent_id).ok_or(Error::NotFound)?.children()?;
             let new_children = tree.get(new_parent_id).ok_or(Error::NotFound)?.children()?;
-            if new_children.contains_key(new_name.as_str()) {
-                return Err(Error::FileExists);
+            if let Some(id) = new_children.get(new_name.as_str()) {
+                replaced_item_id = Some(id.clone());
+                let attr = tree.get(id).unwrap().attr();
+                if attr.is_directory {
+                    return Err(Error::IsADirectory);
+                }
+                if attr.dirty {
+                    return Err(Error::Uploading);
+                }
             }
             let item_id = old_children
                 .get(old_name.as_str())
@@ -320,7 +328,7 @@ impl InodePool {
                 ItemLocation::from_id(&item_id),
                 ItemLocation::from_id(&new_parent_id),
                 Some(new_name),
-                DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Fail),
+                DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Replace),
             )
             .await
         {
@@ -333,12 +341,27 @@ impl InodePool {
             Err(e) => return Err(e.into()),
         }
 
+        log::debug!(
+            "Moved file {:?} from {:?}/{} to {:?}/{}, replaced {:?}",
+            item_id,
+            old_parent_id,
+            old_name.as_str(),
+            new_parent_id,
+            new_name.as_str(),
+            replaced_item_id,
+        );
+
         let mut tree = self.tree.lock().unwrap();
+        // Remove the old item first, or name collides.
+        if let Some(id) = &replaced_item_id {
+            tree.remove_item(id);
+        }
         tree.set_parent(
             &item_id,
             Some((new_parent_id.clone(), new_name.as_str().to_owned())),
         );
-        Ok(())
+
+        Ok(replaced_item_id)
     }
 
     pub async fn remove(
