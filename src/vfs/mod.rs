@@ -118,13 +118,14 @@ impl Vfs {
                         }
                     }
                 }
+                // This event will be triggered after a successful upload.
                 UpdateEvent::UpdateFile(updated) => {
                     this.inode_pool
                         .update_attr(&updated.item_id, |attr| InodeAttr {
                             size: updated.size,
                             mtime: updated.mtime,
-                            c_tag: Some(updated.c_tag.clone().unwrap()),
-                            dirty: updated.c_tag.is_none(),
+                            c_tag: Some(updated.c_tag.clone()),
+                            dirty: true,
                             ..attr
                         });
                 }

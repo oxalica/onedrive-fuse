@@ -78,8 +78,14 @@ pub struct UpdatedFileAttr {
     pub item_id: ItemId,
     pub size: u64,
     pub mtime: SystemTime,
-    /// `None` indicates that the CTag is currently unknown.
-    pub c_tag: Option<Tag>,
+    pub c_tag: Tag,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteFileMeta {
+    size: u64,
+    c_tag: Tag,
+    download_url: String,
 }
 
 impl FilePool {
@@ -107,13 +113,14 @@ impl FilePool {
     }
 
     // Fetch file size, CTag and download URL.
-    async fn fetch_meta(item_id: &ItemId, onedrive: &OneDrive) -> Result<(u64, Tag, String)> {
+    async fn fetch_meta(item_id: &ItemId, onedrive: &OneDrive) -> Result<RemoteFileMeta> {
         // `download_url` is available without `$select`.
         let item = onedrive.get_item(ItemLocation::from_id(item_id)).await?;
-        let file_size = item.size.unwrap() as u64;
-        let tag = item.c_tag.unwrap();
-        let download_url = item.download_url.unwrap();
-        Ok((file_size, tag, download_url))
+        Ok(RemoteFileMeta {
+            size: item.size.unwrap() as u64,
+            c_tag: item.c_tag.unwrap(),
+            download_url: item.download_url.unwrap(),
+        })
     }
 
     async fn open_inner(
@@ -123,50 +130,37 @@ impl FilePool {
         onedrive: ManagedOnedrive,
         client: &reqwest::Client,
     ) -> Result<File> {
-        let (file_size, download_url) = if let Some(cache) = &self.disk_cache {
+        let meta = if let Some(cache) = &self.disk_cache {
             if let Some(state) = cache.get(item_id) {
                 log::debug!("File already cached: {:?}", item_id);
                 return Ok(File::Cached(state));
             }
 
-            let (file_size, c_tag, download_url) =
-                Self::fetch_meta(item_id, &*onedrive.get().await).await?;
+            let meta = Self::fetch_meta(item_id, &*onedrive.get().await).await?;
             if let Some(state) = cache.try_alloc_and_fetch(
                 item_id,
-                file_size,
-                c_tag,
-                &download_url,
+                &meta,
                 None,
                 onedrive,
                 self.event_tx.clone(),
                 client,
             )? {
-                log::debug!("Caching file {:?}, url: {}", item_id, download_url);
+                log::debug!("Caching file {:?}, meta: {:?}", item_id, meta);
                 return Ok(File::Cached(state));
             } else if write_mode {
                 return Err(Error::FileTooLarge);
             }
 
-            (file_size, download_url)
+            meta
         } else if write_mode {
             return Err(Error::WriteWithoutCache);
         } else {
-            let (file_size, _, download_url) =
-                Self::fetch_meta(item_id, &*onedrive.get().await).await?;
-            (file_size, download_url)
+            Self::fetch_meta(item_id, &*onedrive.get().await).await?
         };
 
-        log::debug!("Streaming file {:?}, url: {}", item_id, download_url);
-        let state = FileStreamState::fetch(
-            file_size,
-            download_url,
-            client.clone(),
-            self.config.download.clone(),
-        );
-        Ok(File::Streaming {
-            file_size,
-            state: Arc::new(Mutex::new(state)),
-        })
+        log::debug!("Streaming file {:?}, meta: {:?}", item_id, meta);
+        let state = FileStreamState::fetch(&meta, client.clone(), self.config.download.clone());
+        Ok(File::Streaming(Arc::new(Mutex::new(state))))
     }
 
     pub async fn open(
@@ -259,20 +253,18 @@ impl FilePool {
             }
         }
 
-        let (remote_file_size, c_tag, download_url) =
-            Self::fetch_meta(item_id, &*onedrive.get().await).await?;
+        let meta = Self::fetch_meta(item_id, &*onedrive.get().await).await?;
         log::debug!(
-            "Download with truncate {:?}: new size: {}, remote size: {}",
+            "Download with truncate {:?}: new size: {}, remote meta: {:?}",
             item_id,
             new_size,
-            remote_file_size,
+            meta,
         );
+
         match cache.try_alloc_and_fetch(
             item_id,
-            new_size,
-            c_tag,
-            &download_url,
-            Some((remote_file_size.min(new_size), mtime)),
+            &meta,
+            Some((new_size, mtime)),
             onedrive,
             self.event_tx.clone(),
             client,
@@ -297,10 +289,7 @@ impl FilePool {
             .ok_or(Error::InvalidHandle(fh))?
             .clone();
         match file {
-            File::Streaming { file_size, state } => {
-                let size = (size as u64).min(file_size - offset) as usize;
-                state.lock().await.read(offset, size).await
-            }
+            File::Streaming(state) => state.lock().await.read(offset, size).await,
             File::Cached(state) => FileCache::read(&state, offset, size).await,
         }
     }
@@ -383,38 +372,42 @@ impl FilePool {
 
 #[derive(Debug, Clone)]
 enum File {
-    Streaming {
-        file_size: u64,
-        state: Arc<Mutex<FileStreamState>>,
-    },
+    Streaming(Arc<Mutex<FileStreamState>>),
     Cached(Arc<FileCache>),
 }
 
 #[derive(Debug)]
 struct FileStreamState {
+    file_size: u64,
     current_pos: u64,
     buffer: Option<Bytes>,
     rx: mpsc::Receiver<Bytes>,
 }
 
 impl FileStreamState {
-    fn fetch(
-        file_size: u64,
-        download_url: String,
-        client: reqwest::Client,
-        config: DownloadConfig,
-    ) -> Self {
+    fn fetch(meta: &RemoteFileMeta, client: reqwest::Client, config: DownloadConfig) -> Self {
         let (tx, rx) = mpsc::channel(config.stream_buffer_chunks);
-        tokio::spawn(download_thread(file_size, download_url, tx, client, config));
+        tokio::spawn(download_thread(
+            meta.size,
+            meta.download_url.clone(),
+            tx,
+            client,
+            config,
+        ));
         Self {
+            file_size: meta.size,
             current_pos: 0,
             buffer: None,
             rx,
         }
     }
 
-    /// `offset` and `size` must be already clamped.
     async fn read(&mut self, offset: u64, size: usize) -> Result<Bytes> {
+        let size = (self.file_size.saturating_sub(offset)).min(size as u64) as usize;
+        if size == 0 {
+            return Ok(Bytes::new());
+        }
+
         if offset != self.current_pos {
             return Err(Error::NonsequentialRead {
                 current_pos: self.current_pos,
@@ -549,14 +542,17 @@ impl DiskCache {
     fn try_alloc_and_fetch(
         &self,
         item_id: &ItemId,
-        file_size: u64,
-        c_tag: Tag,
-        download_url: &str,
-        truncate: Option<(u64, SystemTime)>,
+        meta: &RemoteFileMeta,
+        truncate_to: Option<(u64, SystemTime)>,
         onedrive: ManagedOnedrive,
         event_tx: mpsc::Sender<UpdateEvent>,
         client: &reqwest::Client,
     ) -> io::Result<Option<Arc<FileCache>>> {
+        let (file_size, download_truncate) = match truncate_to {
+            None => (meta.size, None),
+            Some((new_size, mtime)) => (new_size, Some((meta.size.min(new_size), mtime))),
+        };
+
         if self.config.disk_cache.max_cached_file_size < file_size {
             return Ok(None);
         }
@@ -585,8 +581,10 @@ impl DiskCache {
         let (file, pos_tx) = FileCache::new(
             item_id.clone(),
             file_size,
-            c_tag,
-            FileCacheStatus::Downloading { truncate },
+            meta.c_tag.clone(),
+            FileCacheStatus::Downloading {
+                truncate: download_truncate,
+            },
             cache_file.into(),
             &self.total_size,
         );
@@ -600,8 +598,8 @@ impl DiskCache {
             self.config.upload.clone(),
         ));
         tokio::spawn(download_thread(
-            file_size,
-            download_url.to_owned(),
+            meta.size,
+            meta.download_url.clone(),
             chunk_tx,
             client.clone(),
             self.config.download.clone(),
@@ -953,7 +951,8 @@ impl FileCache {
             item_id: this.item_id.clone(),
             size: new_size,
             mtime,
-            c_tag: None,
+            // CTag is currently unknown and will be filled after a successful upload.
+            c_tag: Tag(String::new()),
         })
     }
 
@@ -1128,7 +1127,7 @@ impl FileCache {
                         item_id: this.item_id.clone(),
                         size: attr.size,
                         mtime: attr.mtime,
-                        c_tag: Some(c_tag),
+                        c_tag,
                     }))
                     .await;
                 let _ = done_tx.send(true);
