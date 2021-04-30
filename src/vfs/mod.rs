@@ -148,7 +148,7 @@ impl Vfs {
     // Guard for write operation. Return error in readonly mode.
     fn write_guard(&self) -> Result<()> {
         if self.readonly {
-            Err(Error::AccessDenied)
+            Err(Error::Readonly)
         } else {
             Ok(())
         }

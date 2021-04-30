@@ -6,6 +6,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     // User errors.
+    #[error("Read-only filesystem")]
+    Readonly,
     #[error("Object not found")]
     NotFound,
     #[error("Not a directory")]
@@ -18,8 +20,6 @@ pub enum Error {
     InvalidFileName(OsString),
     #[error("File exists")]
     FileExists,
-    #[error("Access denied")]
-    AccessDenied,
     #[error("File changed in remote side, please re-open it")]
     Invalidated,
     #[error("File is uploading, you cannot move or remove it")]
@@ -73,12 +73,12 @@ impl Error {
     pub fn into_c_err(self) -> libc::c_int {
         match &self {
             // User errors.
+            Self::Readonly => libc::EROFS,
             Self::NotFound => libc::ENOENT,
             Self::NotADirectory => libc::ENOTDIR,
             Self::IsADirectory => libc::EISDIR,
             Self::DirectoryNotEmpty => libc::ENOTEMPTY,
             Self::FileExists => libc::EEXIST,
-            Self::AccessDenied => libc::EACCES,
             Self::Invalidated => libc::EPERM,
             Self::Uploading => libc::ETXTBSY,
             Self::InvalidFileName(_) => {
