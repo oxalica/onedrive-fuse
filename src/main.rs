@@ -2,7 +2,7 @@ use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
 use fuse::FUSE_ROOT_ID;
 use onedrive_api::{Auth, Permission};
-use std::{env, io, path::PathBuf};
+use std::{io, path::PathBuf};
 use structopt::StructOpt;
 
 mod config;
@@ -121,7 +121,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
 #[derive(Debug, StructOpt)]
 #[structopt(about = "Mount OneDrive storage as FUSE filesystem.")]
 #[structopt(after_help = concat!("\
-Copyright (C) 2019-2020 ", env!("CARGO_PKG_AUTHORS"), "
+Copyright (C) 2019-2021
 This is free software; see the source for copying conditions. There is NO warranty;
 not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 "))]
