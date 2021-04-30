@@ -19,7 +19,6 @@ pub struct Config {
     #[serde(deserialize_with = "de_duration_sec")]
     period: Duration,
     fetch_page_size: NonZeroUsize,
-    max_changes: usize,
 }
 
 pub struct Tracker {
@@ -34,25 +33,25 @@ impl Tracker {
         onedrive: ManagedOnedrive,
         config: Config,
     ) -> anyhow::Result<Self> {
-        if !config.enable {
-            return Ok(Self {
-                last_sync_time: None,
-                config,
-            });
-        }
+        let (weak, last_sync_time) = match config.enable {
+            false => (Weak::new(), None),
+            true => {
+                let arc = Arc::new(SyncMutex::new(Instant::now()));
+                (Arc::downgrade(&arc), Some(arc))
+            }
+        };
 
-        let last_sync_time = Arc::new(SyncMutex::new(Instant::now()));
         tokio::spawn(tracking_thread(
             None,
             event_tx,
             select_fields,
             onedrive,
-            Arc::downgrade(&last_sync_time),
+            weak,
             config.clone(),
         ));
 
         Ok(Self {
-            last_sync_time: Some(last_sync_time),
+            last_sync_time,
             config,
         })
     }
@@ -83,8 +82,6 @@ async fn tracking_thread(
         let onedrive = onedrive.get().await;
 
         match fetch_changes(&mut delta_url, &select_fields, &onedrive, &config).await {
-            // Wait for the next scan.
-            Ok(None) => {}
             Ok(Some(changes)) => {
                 if event_tx
                     .send(UpdateEvent::BatchUpdate(changes))
@@ -94,15 +91,18 @@ async fn tracking_thread(
                     return;
                 }
             }
+            // Wait for the next scan.
+            Ok(None) => continue,
             Err(err) => {
                 log::error!("Failed to fetch changes: {}", err);
+                continue;
             }
         }
 
         match last_sync_time.upgrade() {
             Some(arc) => *arc.lock().unwrap() = start_time,
             None => return,
-        };
+        }
     }
 }
 
