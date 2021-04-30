@@ -74,6 +74,9 @@ max_total_size = 268435456
 # Once it's full (when read speed is slower than download speed), downloading is temporary blocked.
 # Chunks are from low-level connection. A chunk is about 4~16 KiB.
 stream_buffer_chunks = 256
+# The ring buffer for streaming download. Default to be 4 MiB.
+# Only these bytes behind the maximum downloaded offset will be kept.
+stream_ring_buffer_size = 4194304
 # Max retries to resume download when connection lost before raising error.
 max_retry = 5
 # Delay in seconds between each retry.

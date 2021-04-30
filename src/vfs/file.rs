@@ -4,7 +4,7 @@ use crate::{
     paths::default_disk_cache_dir,
     vfs::{Error, Result, UpdateEvent},
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use lru_cache::LruCache;
 use onedrive_api::{
     option::DriveItemPutOption,
@@ -45,6 +45,7 @@ struct DownloadConfig {
     #[serde(deserialize_with = "de_duration_sec")]
     retry_delay: Duration,
     stream_buffer_chunks: usize,
+    stream_ring_buffer_size: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -379,14 +380,75 @@ enum File {
 #[derive(Debug)]
 struct FileStreamState {
     file_size: u64,
-    current_pos: u64,
-    buffer: Option<Bytes>,
+    buf_start_pos: u64,
+    buf: RingBuf,
     rx: mpsc::Receiver<Bytes>,
+}
+
+#[derive(Debug)]
+struct RingBuf {
+    v: Vec<u8>,
+    l: usize,
+    r: usize,
+}
+
+impl RingBuf {
+    fn new(capacity: usize) -> Self {
+        let v = vec![0u8; capacity.checked_add(1).unwrap()];
+        Self { v, l: 0, r: 0 }
+    }
+
+    fn capacity(&self) -> usize {
+        self.v.len() - 1
+    }
+
+    fn len(&self) -> usize {
+        if self.l <= self.r {
+            self.r - self.l
+        } else {
+            self.r + self.v.len() - self.l
+        }
+    }
+
+    fn slice(&self, range: std::ops::Range<usize>) -> (&[u8], &[u8]) {
+        assert!(range.start <= range.end && range.end <= self.len());
+        let (start, end, l, wrap) = (range.start, range.end, self.l, self.v.len());
+        if l + end <= wrap {
+            (&self.v[(l + start)..(l + end)], &[])
+        } else if wrap < l + start {
+            (&self.v[(l + start - wrap)..(l + end - wrap)], &[])
+        } else {
+            (&self.v[(l + start)..], &self.v[..(l + end - wrap)])
+        }
+    }
+
+    /// Return truncated bytes from left.
+    fn feed(&mut self, data: &[u8]) -> usize {
+        assert!(data.len() <= self.capacity());
+        let truncate = (self.len() + data.len()).saturating_sub(self.capacity());
+        let wrap = self.v.len();
+        if self.l + truncate < wrap {
+            self.l += truncate;
+        } else {
+            self.l = self.l + truncate - wrap;
+        }
+        if self.r + data.len() < wrap {
+            self.v[self.r..(self.r + data.len())].copy_from_slice(data);
+            self.r += data.len();
+        } else {
+            let rest = wrap - self.r;
+            self.v[self.r..].copy_from_slice(&data[..rest]);
+            self.v[..(data.len() - rest)].copy_from_slice(&data[rest..]);
+            self.r = data.len() - rest;
+        }
+        truncate
+    }
 }
 
 impl FileStreamState {
     fn fetch(meta: &RemoteFileMeta, client: reqwest::Client, config: DownloadConfig) -> Self {
         let (tx, rx) = mpsc::channel(config.stream_buffer_chunks);
+        let buf = RingBuf::new(config.stream_ring_buffer_size);
         tokio::spawn(download_thread(
             meta.size,
             meta.download_url.clone(),
@@ -396,8 +458,8 @@ impl FileStreamState {
         ));
         Self {
             file_size: meta.size,
-            current_pos: 0,
-            buffer: None,
+            buf_start_pos: 0,
+            buf,
             rx,
         }
     }
@@ -407,44 +469,31 @@ impl FileStreamState {
         if size == 0 {
             return Ok(Bytes::new());
         }
+        let end = offset + size as u64;
 
-        if offset != self.current_pos {
+        while self.buf_start_pos + (self.buf.len() as u64) < end {
+            let chunk = match self.rx.recv().await {
+                Some(chunk) => chunk,
+                None => return Err(Error::DownloadFailed),
+            };
+            let advance = self.buf.feed(&*chunk);
+            self.buf_start_pos += advance as u64;
+        }
+
+        if offset < self.buf_start_pos {
             return Err(Error::NonsequentialRead {
-                current_pos: self.current_pos,
-                try_offset: offset,
+                current_pos: self.buf_start_pos,
+                read_offset: offset,
+                read_size: size,
             });
         }
 
-        let mut ret_buf = Vec::with_capacity(size);
-        loop {
-            let chunk = match self.buffer.take() {
-                Some(chunk) => chunk,
-                None => match self.rx.recv().await {
-                    Some(chunk) => chunk,
-                    None => break,
-                },
-            };
-
-            let buf_rest_len = ret_buf.capacity() - ret_buf.len();
-            if buf_rest_len < chunk.len() {
-                self.buffer = Some(chunk.slice(buf_rest_len..));
-                ret_buf.extend_from_slice(&chunk[..buf_rest_len]);
-                break;
-            } else {
-                ret_buf.extend_from_slice(&chunk);
-                if ret_buf.len() == ret_buf.capacity() {
-                    break;
-                }
-            }
-        }
-
-        self.current_pos += ret_buf.len() as u64;
-
-        if ret_buf.len() == size {
-            Ok(ret_buf.into())
-        } else {
-            Err(Error::DownloadFailed)
-        }
+        let start = (offset - self.buf_start_pos) as usize;
+        let (lhs, rhs) = self.buf.slice(start..(start + size));
+        let mut ret = BytesMut::with_capacity(size);
+        ret.extend_from_slice(lhs);
+        ret.extend_from_slice(rhs);
+        return Ok(ret.freeze());
     }
 }
 

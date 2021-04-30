@@ -40,8 +40,12 @@ pub enum Error {
     IoError(#[from] std::io::Error),
 
     // Not supported.
-    #[error("Nonsequential read is not supported: current at {current_pos} but try to read {try_offset}")]
-    NonsequentialRead { current_pos: u64, try_offset: u64 },
+    #[error("Nonsequential read is not supported: current at {current_pos} but try to read {read_size} at {read_offset}")]
+    NonsequentialRead {
+        current_pos: u64,
+        read_offset: u64,
+        read_size: usize,
+    },
     #[error("File is too large to write")]
     FileTooLarge,
     #[error("File writing is not supported without disk cache")]
