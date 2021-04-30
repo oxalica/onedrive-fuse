@@ -1,21 +1,24 @@
 use crate::{
     config::de_duration_sec,
+    login::ManagedOnedrive,
     vfs::error::{Error, Result},
 };
 use onedrive_api::OneDrive;
 use serde::Deserialize;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use std::{
+    sync::{Arc, Mutex as SyncMutex, Weak},
+    time::Duration,
+};
 
 pub struct Statfs {
-    config: Config,
-    cache: Mutex<Option<(StatfsData, Instant)>>,
+    cache: Arc<SyncMutex<StatfsData>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    enable_auto_refresh: bool,
     #[serde(deserialize_with = "de_duration_sec")]
-    cache_ttl: Duration,
+    refresh_period: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -25,30 +28,50 @@ pub struct StatfsData {
 }
 
 impl Statfs {
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            cache: Default::default(),
+    pub async fn new(onedrive: ManagedOnedrive, config: Config) -> Result<Self> {
+        let data = Self::statfs_raw(&*onedrive.get().await).await?;
+        let cache = Arc::new(SyncMutex::new(data));
+        if config.enable_auto_refresh {
+            tokio::spawn(Self::refresh_thread(
+                Arc::downgrade(&cache),
+                config.refresh_period,
+                onedrive,
+            ));
+        }
+        Ok(Self { cache })
+    }
+
+    async fn refresh_thread(
+        this: Weak<SyncMutex<StatfsData>>,
+        period: Duration,
+        onedrive: ManagedOnedrive,
+    ) {
+        let mut interval = tokio::time::interval(period);
+        // Skip the first tick at 0.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let this = match this.upgrade() {
+                Some(arc) => arc,
+                None => return,
+            };
+            let data = match Self::statfs_raw(&*onedrive.get().await).await {
+                Ok(data) => data,
+                Err(err) => {
+                    log::error!("Failed to query quota: {}", err);
+                    continue;
+                }
+            };
+            *this.lock().unwrap() = data;
+            log::debug!("Quota refreshed: {:?}", data);
         }
     }
 
-    pub async fn statfs(&self, onedrive: &OneDrive) -> Result<(StatfsData, Duration)> {
-        let mut cache = self.cache.lock().await;
-        if let Some((last_data, last_inst)) = &*cache {
-            if let Some(ttl) = self.config.cache_ttl.checked_sub(last_inst.elapsed()) {
-                return Ok((*last_data, ttl));
-            }
-        }
-
-        // Cache miss.
-        log::debug!("cache miss");
-        let data = self.statfs_raw(onedrive).await?;
-        // Fresh cache.
-        *cache = Some((data, Instant::now()));
-        Ok((data, self.config.cache_ttl))
+    pub fn statfs(&self) -> StatfsData {
+        *self.cache.lock().unwrap()
     }
 
-    async fn statfs_raw(&self, onedrive: &OneDrive) -> Result<StatfsData> {
+    async fn statfs_raw(onedrive: &OneDrive) -> Result<StatfsData> {
         use onedrive_api::{option::ObjectOption, resource::DriveField};
 
         #[derive(Debug, Deserialize)]

@@ -44,8 +44,11 @@ period = 10
 fetch_page_size = 512
 
 [vfs.statfs]
-# Cache timeout in seconds for statfs information.
-cache_ttl = 300
+# Whether to enable auto-refresh on statfs information.
+# If disabled, it will only be fetched in first statfs call and will be kept forever.
+enable_auto_refresh = true
+# Refresh period in seconds.
+refresh_period = 60
 
 [vfs.inode]
 

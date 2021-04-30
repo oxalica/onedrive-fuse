@@ -55,6 +55,8 @@ impl Vfs {
         config: Config,
         onedrive: ManagedOnedrive,
     ) -> anyhow::Result<Arc<Self>> {
+        let statfs = statfs::Statfs::new(onedrive.clone(), config.statfs).await?;
+
         let (event_tx, event_rx) = mpsc::channel(1);
         let (init_tx, init_rx) = oneshot::channel();
         let tracker = tracker::Tracker::new(
@@ -70,7 +72,7 @@ impl Vfs {
         .await?;
 
         let this = Arc::new(Self {
-            statfs: statfs::Statfs::new(config.statfs),
+            statfs,
             id_pool: inode_id::InodeIdPool::new(root_ino),
             inode_pool: inode::InodePool::new(config.inode),
             file_pool: file::FilePool::new(event_tx, config.file)?,
@@ -152,10 +154,10 @@ impl Vfs {
         }
     }
 
-    pub async fn statfs(&self) -> Result<(StatfsData, Duration)> {
-        let (ret, ttl) = self.statfs.statfs(&*self.onedrive().await).await?;
-        log::trace!(target: "vfs::statfs", "statfs: statfs={:?} ttl={:?}", ret, ttl);
-        Ok((ret, ttl))
+    pub async fn statfs(&self) -> Result<StatfsData> {
+        let ret = self.statfs.statfs();
+        log::trace!(target: "vfs::statfs", "statfs: statfs={:?}", ret);
+        Ok(ret)
     }
 
     pub async fn lookup(
