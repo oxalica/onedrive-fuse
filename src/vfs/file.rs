@@ -46,6 +46,8 @@ struct DownloadConfig {
     retry_delay: Duration,
     stream_buffer_chunks: usize,
     stream_ring_buffer_size: usize,
+    #[serde(deserialize_with = "de_duration_sec")]
+    chunk_timeout: Duration,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -541,7 +543,25 @@ async fn download_thread(
             }
         };
 
-        while let Some(chunk) = resp.chunk().await.ok().flatten() {
+        loop {
+            let chunk = match time::timeout(config.chunk_timeout, resp.chunk()).await {
+                Err(_) => {
+                    log::error!("Download stream timeout");
+                    break;
+                }
+                Ok(Err(err)) => {
+                    log::error!("Download stream error: {}", err);
+                    break;
+                }
+                Ok(Ok(None)) => {
+                    if pos != file_size {
+                        log::error!("Download stream ends too early");
+                    }
+                    break;
+                }
+                Ok(Ok(Some(chunk))) => chunk,
+            };
+
             pos += chunk.len() as u64;
             assert!(pos <= file_size);
             if tx.send(chunk).await.is_err() {

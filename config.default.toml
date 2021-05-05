@@ -82,6 +82,9 @@ stream_ring_buffer_size = 4194304
 max_retry = 5
 # Delay in seconds between each retry.
 retry_delay = 5
+# The timeout in seconds waiting for one chunk (aka. timeout of zero download speed).
+# Connection will be aborted and retried if no data received in this period of time.
+chunk_timeout = 20
 
 [vfs.file.upload]
 # Max file size of a file open in write mode. Default to be 2 MiB.
