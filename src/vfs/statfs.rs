@@ -46,11 +46,10 @@ impl Statfs {
         period: Duration,
         onedrive: ManagedOnedrive,
     ) {
-        let mut interval = tokio::time::interval(period);
-        // Skip the first tick at 0.
-        interval.tick().await;
         loop {
-            interval.tick().await;
+            // We don't need to catch up.
+            tokio::time::sleep(period).await;
+
             let this = match this.upgrade() {
                 Some(arc) => arc,
                 None => return,

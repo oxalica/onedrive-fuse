@@ -72,11 +72,9 @@ async fn tracking_thread(
     config: Config,
 ) {
     log::debug!("Tracking thread started");
-    let mut interval = tokio::time::interval(config.period);
 
     loop {
-        // The first tick doesn't wait.
-        interval.tick().await;
+        // Do the first fetch immediately.
         let start_time = Instant::now();
 
         let onedrive = onedrive.get().await;
@@ -103,6 +101,9 @@ async fn tracking_thread(
             Some(arc) => *arc.lock().unwrap() = start_time,
             None => return,
         }
+
+        // We don't need to catch up.
+        tokio::time::sleep(config.period).await;
     }
 }
 
