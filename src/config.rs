@@ -11,6 +11,15 @@ pub struct Config {
     pub permission: PermissionConfig,
     pub vfs: vfs::Config,
     pub relogin: login::ReloginConfig,
+    pub net: NetConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NetConfig {
+    #[serde(deserialize_with = "de_duration_sec")]
+    pub connect_timeout: Duration,
+    #[serde(deserialize_with = "de_duration_sec")]
+    pub request_timeout: Duration,
 }
 
 impl Config {

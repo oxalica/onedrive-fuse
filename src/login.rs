@@ -31,6 +31,7 @@ pub struct ManagedOnedrive {
 
 impl ManagedOnedrive {
     pub async fn login(
+        client: reqwest::Client,
         credential_file: PathBuf,
         config: ReloginConfig,
         mount_readonly: bool,
@@ -62,7 +63,8 @@ impl ManagedOnedrive {
         cred.save(&credential_file)?;
         log::info!("New credential saved");
 
-        let onedrive = Arc::new(RwLock::new(OneDrive::new(
+        let onedrive = Arc::new(RwLock::new(OneDrive::new_with_client(
+            client,
             resp.access_token,
             DriveLocation::me(),
         )));

@@ -1,6 +1,5 @@
 use crate::login::ManagedOnedrive;
 use onedrive_api::{resource::DriveItem, FileName, ItemLocation, OneDrive};
-use reqwest::Client;
 use serde::Deserialize;
 use std::{
     ffi::OsStr,
@@ -44,7 +43,6 @@ pub struct Vfs {
     file_pool: file::FilePool,
     tracker: tracker::Tracker,
     onedrive: ManagedOnedrive,
-    client: Client,
     readonly: bool,
 }
 
@@ -54,6 +52,7 @@ impl Vfs {
         readonly: bool,
         config: Config,
         onedrive: ManagedOnedrive,
+        client: reqwest::Client,
     ) -> anyhow::Result<Arc<Self>> {
         let statfs = statfs::Statfs::new(onedrive.clone(), config.statfs).await?;
 
@@ -75,10 +74,14 @@ impl Vfs {
             statfs,
             id_pool: inode_id::InodeIdPool::new(root_ino),
             inode_pool: inode::InodePool::new(config.inode),
-            file_pool: file::FilePool::new(event_tx, config.file)?,
+            file_pool: file::FilePool::new(
+                event_tx,
+                onedrive.clone(),
+                client.clone(),
+                config.file,
+            )?,
             tracker,
             onedrive,
-            client: Client::new(),
             readonly,
         });
 
@@ -217,10 +220,7 @@ impl Vfs {
             self.write_guard()?;
         }
         let item_id = self.id_pool.get_item_id(ino)?;
-        let fh = self
-            .file_pool
-            .open(&item_id, write, self.onedrive.clone(), &self.client)
-            .await?;
+        let fh = self.file_pool.open(&item_id, write).await?;
         log::trace!(target: "vfs::file", "open_file: ino={} fh={}", ino, fh);
         Ok(fh)
     }
@@ -253,10 +253,7 @@ impl Vfs {
         }
         let (fh, item_id, attr) = self
             .file_pool
-            .open_create_empty(
-                ItemLocation::child_of_id(&parent_id, child_name),
-                &*self.onedrive().await,
-            )
+            .open_create_empty(ItemLocation::child_of_id(&parent_id, child_name))
             .await?;
         self.inode_pool
             .insert_item(parent_id.clone(), child_name, item_id.clone(), attr.clone());
@@ -381,10 +378,7 @@ impl Vfs {
 
     pub async fn write_file(&self, ino: u64, fh: u64, offset: u64, data: &[u8]) -> Result<()> {
         self.write_guard()?;
-        let updated = self
-            .file_pool
-            .write(fh, offset, data, self.onedrive.clone())
-            .await?;
+        let updated = self.file_pool.write(fh, offset, data).await?;
         self.inode_pool
             .update_attr(&updated.item_id, |attr| InodeAttr {
                 size: updated.size,
@@ -418,13 +412,7 @@ impl Vfs {
             (Some(new_size), _) if old_attr.size != new_size => {
                 let mtime = mtime.unwrap_or_else(SystemTime::now);
                 self.file_pool
-                    .truncate_file(
-                        &item_id,
-                        new_size,
-                        mtime,
-                        self.onedrive.clone(),
-                        &self.client,
-                    )
+                    .truncate_file(&item_id, new_size, mtime)
                     .await?;
                 self.inode_pool.update_attr(&item_id, |attr| InodeAttr {
                     dirty: true,

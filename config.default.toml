@@ -11,6 +11,13 @@ readonly = true
 #fmask = 0o022
 #dmask = 0o022
 
+[net]
+# Global connect timeout in seconds for all requests.
+connect_timeout = 10
+# Global request timeout in seconds for all requests except download and upload.
+# There is an individual option `vfs.file.download.chunk_timeout` for download stream chunk timeout.
+request_timeout = 30
+
 [relogin]
 # Whether to enable auto-relogin.
 # Normally the token returned is available for 3600 s (1 hour). We need to periodly re-login

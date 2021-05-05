@@ -106,10 +106,29 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     let config = config::Config::merge_from_default(opt.config.as_deref(), &opt.option)?;
     let readonly = config.permission.readonly;
 
-    let onedrive = ManagedOnedrive::login(credential_path, config.relogin, readonly).await?;
-    let vfs = vfs::Vfs::new(FUSE_ROOT_ID, readonly, config.vfs, onedrive.clone())
-        .await
-        .context("Failed to initialize vfs")?;
+    let client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .gzip(true)
+        .https_only(true)
+        .connect_timeout(config.net.connect_timeout)
+        .timeout(config.net.request_timeout)
+        .build()?;
+    let unlimit_client = reqwest::ClientBuilder::new()
+        .https_only(true)
+        .connect_timeout(config.net.connect_timeout)
+        .build()?;
+
+    let onedrive =
+        ManagedOnedrive::login(client, credential_path, config.relogin, readonly).await?;
+    let vfs = vfs::Vfs::new(
+        FUSE_ROOT_ID,
+        readonly,
+        config.vfs,
+        onedrive.clone(),
+        unlimit_client,
+    )
+    .await
+    .context("Failed to initialize vfs")?;
 
     log::info!("Mounting...");
     let fs = fuse_fs::Filesystem::new(vfs, config.permission);

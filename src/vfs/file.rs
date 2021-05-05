@@ -74,6 +74,9 @@ pub struct FilePool {
     disk_cache: Option<DiskCache>,
     event_tx: mpsc::Sender<UpdateEvent>,
     config: Config,
+    onedrive: ManagedOnedrive,
+    /// The client without timeout limit, which is used for upload and download.
+    client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +97,12 @@ struct RemoteFileMeta {
 impl FilePool {
     pub const SYNC_SELECT_FIELDS: &'static [DriveItemField] = &[DriveItemField::c_tag];
 
-    pub fn new(event_tx: mpsc::Sender<UpdateEvent>, config: Config) -> anyhow::Result<Self> {
+    pub fn new(
+        event_tx: mpsc::Sender<UpdateEvent>,
+        onedrive: ManagedOnedrive,
+        unlimit_client: reqwest::Client,
+        config: Config,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             handles: Slab::new(),
             disk_cache: if config.disk_cache.enable {
@@ -104,6 +112,8 @@ impl FilePool {
             },
             event_tx,
             config,
+            onedrive,
+            client: unlimit_client,
         })
     }
 
@@ -126,27 +136,21 @@ impl FilePool {
         })
     }
 
-    async fn open_inner(
-        &self,
-        item_id: &ItemId,
-        write_mode: bool,
-        onedrive: ManagedOnedrive,
-        client: &reqwest::Client,
-    ) -> Result<File> {
+    async fn open_inner(&self, item_id: &ItemId, write_mode: bool) -> Result<File> {
         let meta = if let Some(cache) = &self.disk_cache {
             if let Some(state) = cache.get(item_id) {
                 log::debug!("File already cached: {:?}", item_id);
                 return Ok(File::Cached(state));
             }
 
-            let meta = Self::fetch_meta(item_id, &*onedrive.get().await).await?;
+            let meta = Self::fetch_meta(item_id, &*self.onedrive.get().await).await?;
             if let Some(state) = cache.try_alloc_and_fetch(
                 item_id,
                 &meta,
                 None,
-                onedrive,
+                self.onedrive.clone(),
                 self.event_tx.clone(),
-                client,
+                self.client.clone(),
             )? {
                 log::debug!("Caching file {:?}, meta: {:?}", item_id, meta);
                 return Ok(File::Cached(state));
@@ -158,24 +162,17 @@ impl FilePool {
         } else if write_mode {
             return Err(Error::WriteWithoutCache);
         } else {
-            Self::fetch_meta(item_id, &*onedrive.get().await).await?
+            Self::fetch_meta(item_id, &*self.onedrive.get().await).await?
         };
 
         log::debug!("Streaming file {:?}, meta: {:?}", item_id, meta);
-        let state = FileStreamState::fetch(&meta, client.clone(), self.config.download.clone());
+        let state =
+            FileStreamState::fetch(&meta, self.client.clone(), self.config.download.clone());
         Ok(File::Streaming(Arc::new(Mutex::new(state))))
     }
 
-    pub async fn open(
-        &self,
-        item_id: &ItemId,
-        write_mode: bool,
-        onedrive: ManagedOnedrive,
-        client: &reqwest::Client,
-    ) -> Result<u64> {
-        let file = self
-            .open_inner(item_id, write_mode, onedrive, client)
-            .await?;
+    pub async fn open(&self, item_id: &ItemId, write_mode: bool) -> Result<u64> {
+        let file = self.open_inner(item_id, write_mode).await?;
         let key = self.handles.insert(file).expect("Pool is full");
         Ok(Self::key_to_fh(key))
     }
@@ -183,11 +180,15 @@ impl FilePool {
     pub async fn open_create_empty(
         &self,
         item_loc: ItemLocation<'_>,
-        onedrive: &OneDrive,
     ) -> Result<(u64, ItemId, InodeAttr)> {
         let cache = self.disk_cache.as_ref().ok_or(Error::WriteWithoutCache)?;
 
-        let item = onedrive.upload_small(item_loc, Vec::new()).await?;
+        let item = self
+            .onedrive
+            .get()
+            .await
+            .upload_small(item_loc, Vec::new())
+            .await?;
         assert_eq!(item.size, Some(0));
         let attr = InodeAttr::parse_item(&item).expect("Invalid attrs");
         let id = item.id.expect("Missing id");
@@ -208,8 +209,6 @@ impl FilePool {
         item_id: &ItemId,
         new_size: u64,
         mtime: SystemTime,
-        onedrive: ManagedOnedrive,
-        client: &reqwest::Client,
     ) -> Result<()> {
         if new_size > self.config.disk_cache.max_cached_file_size {
             return Err(Error::FileTooLarge);
@@ -246,7 +245,8 @@ impl FilePool {
                     file.queue_upload(
                         &mut guard,
                         mtime,
-                        onedrive,
+                        self.onedrive.clone(),
+                        self.client.clone(),
                         self.event_tx.clone(),
                         self.config.upload.clone(),
                     );
@@ -256,7 +256,7 @@ impl FilePool {
             }
         }
 
-        let meta = Self::fetch_meta(item_id, &*onedrive.get().await).await?;
+        let meta = Self::fetch_meta(item_id, &*self.onedrive.get().await).await?;
         log::debug!(
             "Download with truncate {:?}: new size: {}, remote meta: {:?}",
             item_id,
@@ -268,9 +268,9 @@ impl FilePool {
             item_id,
             &meta,
             Some((new_size, mtime)),
-            onedrive,
+            self.onedrive.clone(),
             self.event_tx.clone(),
-            client,
+            self.client.clone(),
         )? {
             Some(_) => Ok(()),
             None => Err(Error::FileTooLarge),
@@ -298,13 +298,7 @@ impl FilePool {
     }
 
     /// Write to cached file. Returns item id and file size after the write.
-    pub async fn write(
-        &self,
-        fh: u64,
-        offset: u64,
-        data: &[u8],
-        onedrive: ManagedOnedrive,
-    ) -> Result<UpdatedFileAttr> {
+    pub async fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<UpdatedFileAttr> {
         let file = self
             .handles
             .get(Self::fh_to_key(fh))
@@ -318,7 +312,8 @@ impl FilePool {
                     offset,
                     data,
                     self.event_tx.clone(),
-                    onedrive,
+                    self.onedrive.clone(),
+                    self.client.clone(),
                     self.config.upload.clone(),
                 )
                 .await
@@ -515,6 +510,9 @@ async fn download_thread(
         let mut resp = loop {
             let ret: anyhow::Result<_> = client
                 .get(&download_url)
+                // We already have timeout for each chunk.
+                // FIXME: Use `Duration::MAX`.
+                .timeout(Duration::from_secs(u64::MAX))
                 .header(header::RANGE, format!("bytes={}-", pos))
                 .send()
                 .await
@@ -615,7 +613,7 @@ impl DiskCache {
         truncate_to: Option<(u64, SystemTime)>,
         onedrive: ManagedOnedrive,
         event_tx: mpsc::Sender<UpdateEvent>,
-        client: &reqwest::Client,
+        client: reqwest::Client,
     ) -> io::Result<Option<Arc<FileCache>>> {
         let (file_size, download_truncate) = match truncate_to {
             None => (meta.size, None),
@@ -663,6 +661,7 @@ impl DiskCache {
             chunk_rx,
             pos_tx,
             onedrive,
+            client.clone(),
             event_tx,
             self.config.upload.clone(),
         ));
@@ -670,7 +669,7 @@ impl DiskCache {
             meta.size,
             meta.download_url.clone(),
             chunk_tx,
-            client.clone(),
+            client,
             self.config.download.clone(),
         ));
         Ok(Some(file))
@@ -807,6 +806,7 @@ impl FileCache {
         mut chunk_rx: mpsc::Receiver<Bytes>,
         pos_tx: watch::Sender<u64>,
         onedrive: ManagedOnedrive,
+        client: reqwest::Client,
         event_tx: mpsc::Sender<UpdateEvent>,
         upload_config: UploadConfig,
     ) {
@@ -830,7 +830,14 @@ impl FileCache {
                         guard.file_size,
                         humantime::format_rfc3339_seconds(mtime),
                     );
-                    this.queue_upload(&mut guard, mtime, onedrive, event_tx, upload_config);
+                    this.queue_upload(
+                        &mut guard,
+                        mtime,
+                        onedrive.clone(),
+                        client.clone(),
+                        event_tx,
+                        upload_config,
+                    );
                 }
                 FileCacheStatus::Downloading { truncate: None } => {
                     guard.status = FileCacheStatus::Available;
@@ -966,6 +973,7 @@ impl FileCache {
         data: &[u8],
         event_tx: mpsc::Sender<UpdateEvent>,
         onedrive: ManagedOnedrive,
+        unlimit_client: reqwest::Client,
         config: UploadConfig,
     ) -> Result<UpdatedFileAttr> {
         let mut guard = this.state.lock().await;
@@ -991,7 +999,14 @@ impl FileCache {
             FileCacheStatus::DownloadFailed => return Err(Error::DownloadFailed),
             FileCacheStatus::Downloading { .. } => unreachable!(),
             FileCacheStatus::Dirty { .. } | FileCacheStatus::Available => {
-                this.queue_upload(&mut guard, mtime, onedrive, event_tx.clone(), config);
+                this.queue_upload(
+                    &mut guard,
+                    mtime,
+                    onedrive,
+                    unlimit_client.clone(),
+                    event_tx.clone(),
+                    config,
+                );
             }
         }
 
@@ -1030,6 +1045,7 @@ impl FileCache {
         guard: &mut MutexGuard<'_, FileCacheState>,
         mtime: SystemTime,
         onedrive: ManagedOnedrive,
+        client: reqwest::Client,
         event_tx: mpsc::Sender<UpdateEvent>,
         config: UploadConfig,
     ) {
@@ -1062,8 +1078,6 @@ impl FileCache {
                     }
                     guard.file_size
                 };
-
-                let client = onedrive.get().await.client().clone();
 
                 // Create upload session.
                 log::info!("Uploading {:?} ({} B)", this.item_id, file_size);
@@ -1105,7 +1119,7 @@ impl FileCache {
                         let mut guard = this.state.lock().await;
                         if !is_up_to_date(&guard.status) {
                             log::debug!("Upload session of {:?} outdates", this.item_id);
-                            if let Err(err) = sess.delete(&client).await {
+                            if let Err(err) = sess.delete(onedrive.get().await.client()).await {
                                 log::error!(
                                     "Failed to delete outdated upload session of {:?}: {}",
                                     this.item_id,
