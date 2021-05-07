@@ -593,7 +593,7 @@ impl DiskCache {
 
         let dir = disk_config.path.clone();
         std::fs::create_dir_all(&dir)?;
-        log::debug!("Disk file cache enabled at: {}", dir.display());
+        log::info!("Disk file cache enabled at: {}", dir.display());
         Ok(Self {
             dir,
             total_size: Arc::new(0.into()),
