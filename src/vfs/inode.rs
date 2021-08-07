@@ -482,17 +482,27 @@ impl InodePool {
                 })()
                 .expect("Missing new parent for non-root item");
 
-                // Some items are children of non-directories. This can happen on `.one` files.
-                // We simply skip them.
-                if matches!(
-                    tree.get(&parent_id).expect("Missing parent"),
-                    Inode::File { .. }
-                ) {
-                    log::debug!("Skip sub-file item {:?}", item_id);
-                    continue;
+                match tree.get(&parent_id) {
+                    // Normal case: parent is a directory.
+                    Some(Inode::Dir { .. }) => Some(parent_id),
+                    // Some items are children of non-directories. This can happen on `.one` files.
+                    // We simply skip them.
+                    Some(Inode::File { .. }) => {
+                        log::debug!("Skip sub-file item {:?}", item_id);
+                        continue;
+                    }
+                    // FIXME: In some case, there are files linked to unknown parents.
+                    // Not sure what's happening here.
+                    // https://github.com/oxalica/onedrive-fuse/issues/1
+                    None => {
+                        log::warn!(
+                            "Skip item {:?} with unexpected new parent: {:?}",
+                            item_id,
+                            item,
+                        );
+                        continue;
+                    }
                 }
-
-                Some(parent_id)
             };
 
             match tree.get_mut(item_id) {
