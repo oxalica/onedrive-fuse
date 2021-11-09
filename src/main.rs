@@ -1,6 +1,5 @@
 use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
-use fuse::FUSE_ROOT_ID;
 use onedrive_api::{Auth, Permission};
 use std::{io, path::PathBuf};
 use structopt::StructOpt;
@@ -121,7 +120,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     let onedrive =
         ManagedOnedrive::login(client, credential_path, config.relogin, readonly).await?;
     let vfs = vfs::Vfs::new(
-        FUSE_ROOT_ID,
+        fuser::FUSE_ROOT_ID,
         readonly,
         config.vfs,
         onedrive.clone(),
@@ -133,7 +132,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     log::info!("Mounting...");
     let fs = fuse_fs::Filesystem::new(vfs, config.permission);
     let mount_point = opt.mount_point;
-    tokio::task::spawn_blocking(move || fuse::mount(fs, &mount_point, &[])).await??;
+    tokio::task::spawn_blocking(move || fuser::mount2(fs, &mount_point, &[])).await??;
     Ok(())
 }
 

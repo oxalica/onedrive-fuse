@@ -1,12 +1,9 @@
 use crate::{config::PermissionConfig, vfs};
-use fuse::*;
-use std::{
-    convert::TryFrom as _,
-    ffi::OsStr,
-    sync::Arc,
-    time::{Duration, SystemTime},
+use fuser::{
+    FileAttr, FileType, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 };
-use time01::Timespec;
+use std::{convert::TryFrom as _, ffi::OsStr, sync::Arc, time::SystemTime};
 
 const GENERATION: u64 = 0;
 const NAME_LEN: u32 = 2048;
@@ -47,10 +44,10 @@ impl FilesystemInner {
             ino,
             size: attr.size,
             blocks: to_blocks_ceil(attr.size),
-            atime: time_to_timespec(attr.mtime), // No info.
-            mtime: time_to_timespec(attr.mtime),
-            ctime: time_to_timespec(attr.mtime), // No info.
-            crtime: time_to_timespec(attr.crtime),
+            atime: attr.mtime, // No info.
+            mtime: attr.mtime,
+            ctime: attr.mtime, // No info.
+            crtime: attr.crtime,
             kind: if attr.is_directory {
                 FileType::Directory
             } else {
@@ -65,18 +62,23 @@ impl FilesystemInner {
             uid: self.perm_config.uid as _,
             gid: self.perm_config.gid as _,
             rdev: 0,
+            blksize: BLOCK_SIZE,
             flags: 0,
         }
     }
 }
 
-impl fuse::Filesystem for Filesystem {
-    fn init(&mut self, _req: &Request) -> std::result::Result<(), libc::c_int> {
+impl fuser::Filesystem for Filesystem {
+    fn init(
+        &mut self,
+        _req: &Request,
+        _config: &mut KernelConfig,
+    ) -> std::result::Result<(), libc::c_int> {
         log::info!("FUSE initialized");
         Ok(())
     }
 
-    fn destroy(&mut self, _req: &Request) {
+    fn destroy(&mut self) {
         log::info!("FUSE destroyed");
     }
 
@@ -104,7 +106,6 @@ impl fuse::Filesystem for Filesystem {
             match inner.vfs.lookup(parent, &name).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok((ino, attr, ttl)) => {
-                    let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
                     reply.entry(&ttl, &attr, GENERATION);
                 }
@@ -123,7 +124,6 @@ impl fuse::Filesystem for Filesystem {
             match inner.vfs.get_attr(ino).await {
                 Err(err) => reply.error(err.into_c_err()),
                 Ok((attr, ttl)) => {
-                    let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
                     reply.attr(&ttl, &attr);
                 }
@@ -131,11 +131,11 @@ impl fuse::Filesystem for Filesystem {
         });
     }
 
-    fn access(&mut self, _req: &Request, _ino: u64, _mask: u32, reply: ReplyEmpty) {
+    fn access(&mut self, _req: &Request, _ino: u64, _mask: i32, reply: ReplyEmpty) {
         reply.ok();
     }
 
-    fn opendir(&mut self, _req: &Request, ino: u64, _flags: u32, reply: ReplyOpen) {
+    fn opendir(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
         // FIXME: Check flags?
         self.spawn(|inner| async move {
             match inner.vfs.open_dir(ino).await {
@@ -145,7 +145,7 @@ impl fuse::Filesystem for Filesystem {
         });
     }
 
-    fn releasedir(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, reply: ReplyEmpty) {
+    fn releasedir(&mut self, _req: &Request, ino: u64, fh: u64, _flags: i32, reply: ReplyEmpty) {
         self.spawn(|inner| async move {
             inner.vfs.close_dir(ino, fh).await.unwrap();
             reply.ok();
@@ -192,18 +192,18 @@ impl fuse::Filesystem for Filesystem {
         });
     }
 
-    fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         // Read is always allowed.
         static_assertions::const_assert_eq!(libc::O_RDONLY, 0);
         log::trace!("open flags: {:#x}", flags);
 
-        let write = (flags & libc::O_WRONLY as u32) != 0;
-        assert_eq!(flags & libc::O_TRUNC as u32, 0);
-        let ret_flags = flags & libc::O_WRONLY as u32;
+        let write = (flags & libc::O_WRONLY) != 0;
+        assert_eq!(flags & libc::O_TRUNC, 0);
+        let ret_flags = flags & libc::O_WRONLY;
 
         self.spawn(|inner| async move {
             match inner.vfs.open_file(ino, write).await {
-                Ok(fh) => reply.opened(fh, ret_flags),
+                Ok(fh) => reply.opened(fh, ret_flags as u32),
                 Err(err) => reply.error(err.into_c_err()),
             }
         });
@@ -215,15 +215,16 @@ impl fuse::Filesystem for Filesystem {
         parent: u64,
         name: &OsStr,
         _mode: u32,
-        flags: u32,
+        _umask: u32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
         log::trace!("open flags: {:#x}", flags);
 
-        let _write = (flags & libc::O_WRONLY as u32) != 0;
-        let exclusive = (flags & libc::O_EXCL as u32) != 0;
-        let truncate = (flags & libc::O_TRUNC as u32) != 0;
-        let ret_flags = flags & (libc::O_WRONLY | libc::O_EXCL | libc::O_TRUNC) as u32;
+        let _write = (flags & libc::O_WRONLY) != 0;
+        let exclusive = (flags & libc::O_EXCL) != 0;
+        let truncate = (flags & libc::O_TRUNC) != 0;
+        let ret_flags = flags & (libc::O_WRONLY | libc::O_EXCL | libc::O_TRUNC);
 
         let name = name.to_owned();
         self.spawn(|inner| async move {
@@ -233,9 +234,8 @@ impl fuse::Filesystem for Filesystem {
                 .await
             {
                 Ok((ino, fh, attr, ttl)) => {
-                    let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
-                    reply.created(&ttl, &attr, GENERATION, fh, ret_flags)
+                    reply.created(&ttl, &attr, GENERATION, fh, ret_flags as u32)
                 }
                 Err(err) => reply.error(err.into_c_err()),
             }
@@ -247,8 +247,8 @@ impl fuse::Filesystem for Filesystem {
         _req: &Request,
         ino: u64,
         fh: u64,
-        _flags: u32,
-        _lock_owner: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
@@ -267,6 +267,8 @@ impl fuse::Filesystem for Filesystem {
         fh: u64,
         offset: i64,
         size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
         let offset = u64::try_from(offset).unwrap();
@@ -282,12 +284,19 @@ impl fuse::Filesystem for Filesystem {
         });
     }
 
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, reply: ReplyEntry) {
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
         let name = name.to_owned();
         self.spawn(|inner| async move {
             match inner.vfs.create_dir(parent, &name).await {
                 Ok((ino, attr, ttl)) => {
-                    let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
                     reply.entry(&ttl, &attr, GENERATION)
                 }
@@ -303,8 +312,10 @@ impl fuse::Filesystem for Filesystem {
         name: &OsStr,
         newparent: u64,
         newname: &OsStr,
+        _flags: u32,
         reply: ReplyEmpty,
     ) {
+        // TODO: Handle flags.
         let name = name.to_owned();
         let newname = newname.to_owned();
         self.spawn(|inner| async move {
@@ -342,7 +353,9 @@ impl fuse::Filesystem for Filesystem {
         fh: u64,
         offset: i64,
         data: &[u8],
-        _flags: u32,
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
         let data = data.to_owned();
@@ -357,26 +370,29 @@ impl fuse::Filesystem for Filesystem {
 
     fn setattr(
         &mut self,
-        _req: &Request,
+        _req: &Request<'_>,
         ino: u64,
         _mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<Timespec>,
-        mtime: Option<Timespec>,
+        _atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
         _fh: Option<u64>,
-        _crtime: Option<Timespec>,
-        _chgtime: Option<Timespec>,
-        _bkuptime: Option<Timespec>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
         self.spawn(|inner| async move {
-            let mtime = mtime.map(timespec_to_time);
+            let mtime = mtime.map(|time| match time {
+                TimeOrNow::SpecificTime(time) => time,
+                TimeOrNow::Now => SystemTime::now(),
+            });
             match inner.vfs.set_attr(ino, size, mtime).await {
                 Ok((attr, ttl)) => {
-                    let ttl = dur_to_timespec(ttl);
                     let attr = inner.cvt_attr(ino, attr);
                     reply.attr(&ttl, &attr)
                 }
@@ -413,16 +429,4 @@ fn to_blocks_ceil(bytes: u64) -> u64 {
 
 fn to_blocks_floor(bytes: u64) -> u64 {
     bytes / BLOCK_SIZE as u64
-}
-
-fn dur_to_timespec(dur: Duration) -> Timespec {
-    Timespec::new(dur.as_secs() as i64, dur.subsec_nanos() as i32)
-}
-
-fn time_to_timespec(t: SystemTime) -> Timespec {
-    dur_to_timespec(t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default())
-}
-
-fn timespec_to_time(t: Timespec) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::new(t.sec as u64, t.nsec as u32)
 }
