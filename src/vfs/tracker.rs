@@ -147,7 +147,7 @@ async fn fetch_changes(
     let mut total_changes = 0usize;
     let mut ret = Vec::new();
     let mut seen_ids = HashSet::new();
-    while let Some(changes) = fetcher.fetch_next_page(&onedrive).await? {
+    while let Some(changes) = fetcher.fetch_next_page(onedrive).await? {
         total_changes += changes.len();
         page += 1;
 

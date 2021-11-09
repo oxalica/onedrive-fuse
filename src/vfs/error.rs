@@ -27,17 +27,17 @@ pub enum Error {
 
     // Api and network errors.
     #[error("Api error: {0}")]
-    ApiError(onedrive_api::Error),
-    #[error("Api error (deserialization): {0}")]
-    ApiDeserializeError(#[from] serde_json::Error),
+    Api(onedrive_api::Error),
+    #[error("Deserialization error: {0}")]
+    Deserialize(#[from] serde_json::Error),
     #[error("reqwest error: {0}")]
-    ReqwestError(#[from] reqwest::Error),
+    Reqwest(#[from] reqwest::Error),
     #[error("Download failed")]
     DownloadFailed,
 
     // IO error.
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
 
     // Not supported.
     #[error("Nonsequential read is not supported: current at {current_pos} but try to read {read_size} at {read_offset}")]
@@ -64,7 +64,7 @@ impl From<onedrive_api::Error> for Error {
         match err.status_code() {
             Some(StatusCode::NOT_FOUND) => Self::NotFound,
             Some(StatusCode::CONFLICT) => Self::FileExists,
-            _ => Self::ApiError(err),
+            _ => Self::Api(err),
         }
     }
 }
@@ -87,10 +87,7 @@ impl Error {
             }
 
             // Network errors.
-            Self::ApiError(_)
-            | Self::ApiDeserializeError(_)
-            | Self::ReqwestError(_)
-            | Self::IoError(_) => {
+            Self::Api(_) | Self::Deserialize(_) | Self::Reqwest(_) | Self::Io(_) => {
                 log::error!("{}", self);
                 log::debug!("{:?}", self);
                 libc::EIO

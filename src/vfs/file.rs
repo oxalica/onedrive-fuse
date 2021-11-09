@@ -216,7 +216,7 @@ impl FilePool {
 
         let cache = self.disk_cache.as_ref().ok_or(Error::WriteWithoutCache)?;
 
-        let file = cache.cache.lock().unwrap().get_mut(&item_id).cloned();
+        let file = cache.cache.lock().unwrap().get_mut(item_id).cloned();
         if let Some(file) = file {
             let mut guard = file.state.lock().await;
             match guard.status {
@@ -490,7 +490,7 @@ impl FileStreamState {
         let mut ret = BytesMut::with_capacity(size);
         ret.extend_from_slice(lhs);
         ret.extend_from_slice(rhs);
-        return Ok(ret.freeze());
+        Ok(ret.freeze())
     }
 }
 
@@ -625,7 +625,7 @@ impl DiskCache {
         }
 
         let mut cache = self.cache.lock().unwrap();
-        if let Some(state) = cache.get_mut(&item_id) {
+        if let Some(state) = cache.get_mut(item_id) {
             return Ok(Some(state.clone()));
         }
 
@@ -796,7 +796,7 @@ impl FileCache {
             }),
             item_id,
             c_tag: SyncMutex::new(c_tag),
-            cache_total_size: Arc::downgrade(&cache_total_size),
+            cache_total_size: Arc::downgrade(cache_total_size),
         });
         (this, pos_tx)
     }

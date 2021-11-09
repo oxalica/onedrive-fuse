@@ -45,8 +45,8 @@ impl InodeAttr {
                 .context("Missing file_system_info")?;
             Ok(InodeAttr {
                 size: item.size.context("Missing size")? as u64,
-                mtime: parse_time(&fs_info, "lastModifiedDateTime")?,
-                crtime: parse_time(&fs_info, "createdDateTime")?,
+                mtime: parse_time(fs_info, "lastModifiedDateTime")?,
+                crtime: parse_time(fs_info, "createdDateTime")?,
                 is_directory: item.folder.is_some(),
                 c_tag: if item.folder.is_some() {
                     None
@@ -326,7 +326,7 @@ impl InodePool {
         match onedrive
             .move_with_option(
                 ItemLocation::from_id(&item_id),
-                ItemLocation::from_id(&new_parent_id),
+                ItemLocation::from_id(new_parent_id),
                 Some(new_name),
                 DriveItemPutOption::new().conflict_behavior(ConflictBehavior::Replace),
             )
@@ -444,7 +444,7 @@ impl InodePool {
         );
 
         let mut tree = self.tree.lock().unwrap();
-        tree.get_mut(&item_id).unwrap().set_attr(attr.clone());
+        tree.get_mut(item_id).unwrap().set_attr(attr.clone());
         Ok(attr)
     }
 
@@ -509,13 +509,13 @@ impl InodePool {
                 // Insert a new item.
                 None => {
                     log::debug!("Insert item {:?}", item_id);
-                    let attr = InodeAttr::parse_item(&item).expect("Invalid attrs");
+                    let attr = InodeAttr::parse_item(item).expect("Invalid attrs");
                     tree.insert_item(item_id.clone(), attr);
                 }
                 // Update an existing item.
                 Some(inode) => {
                     log::debug!("Update item {:?}", item_id);
-                    let attr = InodeAttr::parse_item(&item).expect("Invalid attrs");
+                    let attr = InodeAttr::parse_item(item).expect("Invalid attrs");
                     inode.set_attr(attr);
                 }
             }

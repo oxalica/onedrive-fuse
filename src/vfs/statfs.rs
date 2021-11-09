@@ -84,7 +84,7 @@ impl Statfs {
             .get_drive_with_option(ObjectOption::new().select(&[DriveField::quota]))
             .await?;
         let quota: Quota =
-            serde_json::from_value(*drive.quota.unwrap()).map_err(Error::ApiDeserializeError)?;
+            serde_json::from_value(*drive.quota.unwrap()).map_err(Error::Deserialize)?;
         Ok(StatfsData {
             total: quota.total,
             free: quota.remaining,
