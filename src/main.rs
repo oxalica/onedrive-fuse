@@ -1,8 +1,8 @@
 use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
+use clap::{Args, Parser};
 use onedrive_api::{Auth, Permission};
 use std::{io, path::PathBuf};
-use structopt::StructOpt;
 
 mod config;
 mod fuse_fs;
@@ -136,9 +136,9 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "Mount OneDrive storage as FUSE filesystem.")]
-#[structopt(after_help = concat!("\
+#[derive(Debug, Parser)]
+#[clap(about = "Mount OneDrive storage as FUSE filesystem.")]
+#[clap(after_help = concat!("\
 Copyright (C) 2019-2021
 This is free software; see the source for copying conditions. There is NO warranty;
 not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -150,8 +150,8 @@ enum Opt {
     Mount(OptMount),
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(after_help = "\
+#[derive(Debug, Args)]
+#[clap(after_help = "\
 EXAMPLES:
     # Login with some client id.
     onedrive-fuse --client-id 00000000-0000-0000-0000-000000000000
@@ -162,15 +162,15 @@ EXAMPLES:
 struct OptLogin {
     /// Secret credential file to save your logined OneDrive account.
     /// Default to be `$HOME/.onedrive/credential.json`.
-    #[structopt(short, long, parse(from_os_str))]
+    #[clap(short, long, parse(from_os_str))]
     credential: Option<PathBuf>,
 
     /// The client id used for OAuth2.
-    #[structopt(long)]
+    #[clap(long)]
     client_id: String,
 
     /// Request for read-write instead of read-only permission.
-    #[structopt(short = "w", long)]
+    #[clap(short = 'w', long)]
     read_write: bool,
 
     /// The login code for Code-Auth.
@@ -179,8 +179,8 @@ struct OptLogin {
     code: Option<String>,
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(after_help = "\
+#[derive(Debug, Args)]
+#[clap(after_help = "\
 EXAMPLES:
     # Using default credential file to mount OneDrive on `~/mnt`.
     onedrive-fuse mount ~/mnt
@@ -194,20 +194,20 @@ EXAMPLES:
 struct OptMount {
     /// Secret credential file to login OneDrive account.
     /// Default to be `$HOME/.onedrive_fuse/credential.json`.
-    #[structopt(short, long, parse(from_os_str))]
+    #[clap(short, long, parse(from_os_str))]
     credential: Option<PathBuf>,
 
     /// Config file to override default settings.
     /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
-    #[structopt(long, parse(from_os_str))]
+    #[clap(long, parse(from_os_str))]
     config: Option<PathBuf>,
 
     /// Mount point.
-    #[structopt(parse(from_os_str))]
+    #[clap(parse(from_os_str))]
     mount_point: PathBuf,
 
     /// Options to override default settings.
     /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
-    #[structopt(short, long)]
+    #[clap(short, long)]
     option: Vec<String>,
 }
