@@ -139,7 +139,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
 #[derive(Debug, Parser)]
 #[clap(about = "Mount OneDrive storage as FUSE filesystem.")]
 #[clap(after_help = concat!("\
-Copyright (C) 2019-2021
+Copyright (C) 2019-2022, Oxalica
 This is free software; see the source for copying conditions. There is NO warranty;
 not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 "))]
