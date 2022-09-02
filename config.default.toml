@@ -1,6 +1,8 @@
 [permission]
 # Readonly mode. Default to be true.
 readonly = true
+# Allow execution of binaries.
+executable = false
 # Owner user and group id for all files and directories, since OneDrive files don't have UNIX UID or GID.
 # Default to be UID and GID of the current process.
 #uid = 1000

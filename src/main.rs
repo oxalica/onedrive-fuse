@@ -1,6 +1,7 @@
 use crate::login::ManagedOnedrive;
 use anyhow::{Context as _, Result};
 use clap::{Args, Parser};
+use fuser::MountOption;
 use onedrive_api::{Auth, Permission};
 use std::{io, path::PathBuf};
 
@@ -130,9 +131,26 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     .context("Failed to initialize vfs")?;
 
     log::info!("Mounting...");
+    let fuse_options = [
+        MountOption::FSName("onedrive".into()),
+        MountOption::DefaultPermissions, // Check permission in the kernel.
+        MountOption::NoDev,
+        MountOption::NoSuid,
+        MountOption::NoAtime,
+        if config.permission.executable {
+            MountOption::Exec
+        } else {
+            MountOption::NoExec
+        },
+        if readonly {
+            MountOption::RO
+        } else {
+            MountOption::RW
+        },
+    ];
     let fs = fuse_fs::Filesystem::new(vfs, config.permission);
-    let mount_point = opt.mount_point;
-    tokio::task::spawn_blocking(move || fuser::mount2(fs, &mount_point, &[])).await??;
+    tokio::task::spawn_blocking(move || fuser::mount2(fs, &opt.mount_point, &fuse_options))
+        .await??;
     Ok(())
 }
 

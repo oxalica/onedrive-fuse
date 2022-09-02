@@ -45,6 +45,7 @@ impl Config {
 #[derive(Debug, Deserialize)]
 pub struct PermissionConfig {
     pub readonly: bool,
+    pub executable: bool,
     #[serde(default = "get_uid")]
     pub uid: libc::uid_t,
     #[serde(default = "get_gid")]
