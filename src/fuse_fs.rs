@@ -75,6 +75,7 @@ impl fuser::Filesystem for Filesystem {
         _config: &mut KernelConfig,
     ) -> std::result::Result<(), libc::c_int> {
         log::info!("FUSE initialized");
+        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
         Ok(())
     }
 
