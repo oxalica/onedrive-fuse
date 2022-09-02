@@ -14,19 +14,19 @@ license = "GPL-3.0"
 anyhow = "1.0.28"
 # Compat with `reqwest`
 bytes = "1.0.1"
-config = { version = "0.11.0", default-features = false, features = ["toml"] }
+config = { version = "0.13", default-features = false, features = ["toml"] }
 dirs = "4.0.0"
 env_logger = "0.9.0"
-fuser = "0.9.1"
+fuser = "0.11"
 http = "0.2.1"
 humantime = "2.0.1"
 indexmap = "1.6.2"
 libc = "0.2.69"
 log = "0.4.8"
 lru-cache = "0.1.2"
-nix = "0.23.0"
+nix = "0.25"
 onedrive-api = "0.8.1"
-open = "2.0.0"
+open = "3"
 reqwest = "0.11.0"
 serde = { version = "1.0.106", features = ["derive"] }
 serde_json = "1.0.51"

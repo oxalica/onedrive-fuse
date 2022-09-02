@@ -26,17 +26,19 @@ impl Config {
     pub fn merge_from_default(config_path: Option<&Path>, options: &[String]) -> Result<Self> {
         use config::{File, FileFormat};
 
-        let mut conf = config::Config::new();
-        conf.merge(File::from_str(DEFAULT_CONFIG, FileFormat::Toml))?;
+        let mut builder = config::Config::builder();
+        builder = builder.add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Toml));
         if let Some(path) = config_path {
-            let path = path.to_str().context("Invalid config file path")?;
-            conf.merge(File::new(path, FileFormat::Toml))?;
+            builder = builder.add_source(File::from(path).format(FileFormat::Toml));
         }
         for opt in options {
             // Kind of tricky. Toml can parse option format `a.b="foo"` as expected.
-            conf.merge(File::from_str(opt, FileFormat::Toml))?;
+            builder = builder.add_source(File::from_str(opt, FileFormat::Toml));
         }
-        Ok(conf.try_into()?)
+        builder
+            .build()
+            .and_then(|conf| conf.try_deserialize())
+            .context("Failed to load configuration")
     }
 }
 
