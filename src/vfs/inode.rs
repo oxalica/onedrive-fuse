@@ -1,4 +1,4 @@
-//! Directory hierarachy and item attributes.
+//! Directory hierarchy and item attributes.
 use crate::vfs::error::{Error, Result};
 use http::StatusCode;
 use indexmap::IndexMap;
@@ -99,7 +99,7 @@ impl InodeTree {
     fn insert_item(&mut self, id: ItemId, attr: InodeAttr) {
         assert!(
             self.map.insert(id, (Inode::new(attr), None)).is_none(),
-            "Alreay exists"
+            "Already exists"
         );
     }
 
@@ -333,7 +333,7 @@ impl InodePool {
             .await
         {
             Ok(_) => {}
-            // 400 Bad Request is responsed when the destination item is not a directory.
+            // 400 Bad Request is returned when the destination item is not a directory.
             // `error: { code: "invalidRequest", message: "Bad Argument" }`
             Err(e) if e.status_code() == Some(StatusCode::BAD_REQUEST) => {
                 return Err(Error::NotADirectory)

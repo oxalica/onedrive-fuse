@@ -64,7 +64,7 @@ refresh_period = 60
 [vfs.file.disk_cache]
 # Whether to enable on-disk file cache. Required to support uploading.
 # Files smaller than `max_cached_file_size` are saved in LRU cache directory on disk.
-# When they are opened and not removed from cache, a downloding thread is running in background to
+# When they are opened and not removed from cache, a downloading thread is running in background to
 # download the whole content of the file, though maybe programs only read some bytes of it.
 # Note that if a file still opened, it will never be removed from LRU cache.
 enable = true
@@ -101,7 +101,7 @@ chunk_timeout = 20
 # the file to be in disk cache.
 max_size = 2097152
 # Delay between write call and actual uploading.
-# Mutliple writes on a single file within this duration will only be uploaded once.
+# Multiple writes on a single file within this duration will only be uploaded once.
 flush_delay = 5
 # Delay in seconds between each retry.
 retry_delay = 5

@@ -954,7 +954,7 @@ impl FileCache {
             }
         }
 
-        // File size should be retrive after waiting since it may change.
+        // File size should be retrieved after waiting since it may change.
         let end = end.min(guard.file_size);
 
         let mut buf = vec![0u8; (end - offset) as usize];
