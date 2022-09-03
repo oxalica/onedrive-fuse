@@ -6,8 +6,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     // User errors.
-    #[error("Read-only filesystem")]
-    Readonly,
     #[error("Object not found")]
     NotFound,
     #[error("Not a directory")]
@@ -73,7 +71,6 @@ impl Error {
     pub fn into_c_err(self) -> libc::c_int {
         match &self {
             // User errors.
-            Self::Readonly => libc::EROFS,
             Self::NotFound => libc::ENOENT,
             Self::NotADirectory => libc::ENOTDIR,
             Self::IsADirectory => libc::EISDIR,

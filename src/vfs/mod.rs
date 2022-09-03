@@ -148,15 +148,6 @@ impl Vfs {
         self.tracker.time_to_next_sync().unwrap_or(MAX_TTL)
     }
 
-    // Guard for write operation. Return error in readonly mode.
-    fn write_guard(&self) -> Result<()> {
-        if self.readonly {
-            Err(Error::Readonly)
-        } else {
-            Ok(())
-        }
-    }
-
     pub async fn statfs(&self) -> Result<StatfsData> {
         let ret = self.statfs.statfs();
         log::trace!(target: "vfs::statfs", "statfs: statfs={:?}", ret);
@@ -216,9 +207,6 @@ impl Vfs {
     }
 
     pub async fn open_file(&self, ino: u64, write: bool) -> Result<u64> {
-        if write {
-            self.write_guard()?;
-        }
         let item_id = self.id_pool.get_item_id(ino)?;
         let fh = self.file_pool.open(&item_id, write).await?;
         log::trace!(target: "vfs::file", "open_file: ino={} fh={}", ino, fh);
@@ -232,7 +220,6 @@ impl Vfs {
         truncate: bool,
         exclusive: bool,
     ) -> Result<(u64, u64, InodeAttr, Duration)> {
-        self.write_guard()?;
         let parent_id = self.id_pool.get_item_id(parent_ino)?;
         let child_name = cvt_filename(child_name)?;
         if !truncate {
@@ -292,7 +279,6 @@ impl Vfs {
         parent_ino: u64,
         name: &OsStr,
     ) -> Result<(u64, InodeAttr, Duration)> {
-        self.write_guard()?;
         let name = cvt_filename(name)?;
         let parent_id = self.id_pool.get_item_id(parent_ino)?;
         let (id, attr) = self
@@ -315,7 +301,6 @@ impl Vfs {
         new_parent_ino: u64,
         new_name: &OsStr,
     ) -> Result<()> {
-        self.write_guard()?;
         let name = cvt_filename(name)?;
         let new_name = cvt_filename(new_name)?;
         let parent_id = self.id_pool.get_item_id(parent_ino)?;
@@ -347,7 +332,6 @@ impl Vfs {
     }
 
     pub async fn remove_dir(&self, parent_ino: u64, name: &OsStr) -> Result<()> {
-        self.write_guard()?;
         let name = cvt_filename(name)?;
         let parent_id = self.id_pool.get_item_id(parent_ino)?;
         self.inode_pool
@@ -362,7 +346,6 @@ impl Vfs {
     }
 
     pub async fn remove_file(&self, parent_ino: u64, name: &OsStr) -> Result<()> {
-        self.write_guard()?;
         let name = cvt_filename(name)?;
         let parent_id = self.id_pool.get_item_id(parent_ino)?;
         self.inode_pool
@@ -377,7 +360,6 @@ impl Vfs {
     }
 
     pub async fn write_file(&self, ino: u64, fh: u64, offset: u64, data: &[u8]) -> Result<()> {
-        self.write_guard()?;
         let updated = self.file_pool.write(fh, offset, data).await?;
         self.inode_pool
             .update_attr(&updated.item_id, |attr| InodeAttr {
@@ -400,7 +382,6 @@ impl Vfs {
         size: Option<u64>,
         mtime: Option<SystemTime>,
     ) -> Result<(InodeAttr, Duration)> {
-        self.write_guard()?;
         let item_id = self.id_pool.get_item_id(ino)?;
         let old_attr = self.inode_pool.get_attr(&item_id)?;
         if size.is_some() && old_attr.is_directory {
