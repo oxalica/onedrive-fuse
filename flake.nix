@@ -1,5 +1,5 @@
 {
-  description = "Mount your Microsoft OneDrive storage as FUSE filesystem";
+  description = "Mount Microsoft OneDrive storage as FUSE filesystem";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";

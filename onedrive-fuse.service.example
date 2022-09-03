@@ -1,0 +1,7 @@
+[Unit]
+Description=Mount Microsoft OneDrive storage as FUSE filesystem
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/onedrive-fuse mount /path/to/mount/point
+ExecStop=/usr/bin/fusermount -u /path/to/mount/point
