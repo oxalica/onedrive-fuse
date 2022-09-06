@@ -11,7 +11,7 @@
       let
         inherit (builtins) readFile fromTOML;
         pkgs = nixpkgs.legacyPackages.${system};
-        manifest = fromTOML (readFile ./Cargo.toml);
+        manifest = fromTOML (readFile (self + "/Cargo.toml"));
 
         inherit (manifest.package) name version;
         nativeBuildInputs = with pkgs; [ pkg-config ];
@@ -24,8 +24,8 @@
             pname = name;
             inherit version nativeBuildInputs buildInputs;
 
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            src = self;
+            cargoLock.lockFile = self + "/Cargo.lock";
 
             meta.license = nixpkgs.lib.licenses.mit;
           };
