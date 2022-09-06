@@ -42,7 +42,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PermissionConfig {
     pub readonly: bool,
     pub executable: bool,

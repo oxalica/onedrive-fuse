@@ -6,7 +6,6 @@ use onedrive_api::{Auth, Permission};
 use std::{io, path::PathBuf};
 
 mod config;
-mod fuse_fs;
 mod login;
 mod paths;
 mod vfs;
@@ -121,9 +120,8 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     let onedrive =
         ManagedOnedrive::login(client, credential_path, config.relogin, readonly).await?;
     let vfs = vfs::Vfs::new(
-        fuser::FUSE_ROOT_ID,
-        readonly,
         config.vfs,
+        config.permission.clone(),
         onedrive.clone(),
         unlimit_client,
     )
@@ -148,8 +146,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
             MountOption::RW
         },
     ];
-    let fs = fuse_fs::Filesystem::new(vfs, config.permission);
-    tokio::task::spawn_blocking(move || fuser::mount2(fs, &opt.mount_point, &fuse_options))
+    tokio::task::spawn_blocking(move || fuser::mount2(&*vfs, &opt.mount_point, &fuse_options))
         .await??;
     Ok(())
 }

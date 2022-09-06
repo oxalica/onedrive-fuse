@@ -1,5 +1,8 @@
 # onedrive-fuse
 
+:warning: This branch is experimental for the rewrite of the whole VFS module.
+Check `master` branch for the latest stable version.
+
 [![crates.io](https://img.shields.io/crates/v/onedrive-fuse.svg)](https://crates.io/crates/onedrive-fuse)
 
 Mount [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
@@ -106,39 +109,33 @@ Note that you still need to manually [login](#prepare) first.
 
 <details>
 
-- [x] FUSE syscalls
-  - [x] Read
-    - [x] access
-    - [x] forget
-    - [x] getattr
-    - [x] lookup
-    - [x] open
-      - [x] O_RDONLY
-    - [x] opendir
-    - [x] read
-    - [x] readdir
-    - [x] release
-    - [x] releasedir
-    - [x] statfs
-  - [x] Write
-    - [x] create
-    - [x] mkdir
-    - [x] open
-      - [x] O_WRONLY/O_RDWR
-      - [x] O_TRUNC
-      - [x] O_EXCL
-    - [x] rename
-    - [x] rmdir
-    - [x] setattr
-      - [x] size
-      - [x] mtime
-    - [x] unlink
-    - [x] write
-  - [x] Other
+- [ ] FUSE syscalls
+  - [ ] Read
+    - [ ] access
+    - [ ] forget
+    - [ ] getattr
+    - [ ] lookup
+    - [ ] open
+    - [ ] opendir
+    - [ ] read
+    - [ ] readdir
+    - [ ] release
+    - [ ] releasedir
+    - [ ] statfs
+  - [ ] Write
+    - [ ] create
+    - [ ] mkdir
+    - [ ] open
+    - [ ] rename
+    - [ ] rmdir
+    - [ ] setattr
+    - [ ] unlink
+    - [ ] write
+  - [ ] Other
     - destroy
     - flush
-    - [x] fsync
-    - [x] fsyncdir
+    - [ ] fsync
+    - [ ] fsyncdir
     - init
   - Unsupported
     - bmap
@@ -152,13 +149,6 @@ Note that you still need to manually [login](#prepare) first.
     - setlk
     - setxattr
     - symlink
-- [x] Cache
-  - [x] Statfs cache
-  - [x] Inode attributes (stat) cache
-  - [x] Directory tree cache
-  - [x] Sync remote changes with local cache
-  - [x] File read cache
-  - [x] File write cache/buffer
 
 </details>
 
