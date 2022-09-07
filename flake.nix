@@ -14,15 +14,16 @@
         manifest = fromTOML (readFile (self + "/Cargo.toml"));
 
         inherit (manifest.package) name version;
-        nativeBuildInputs = with pkgs; [ pkg-config ];
-        buildInputs = with pkgs; [ fuse openssl ];
 
       in {
         packages = rec {
           ${name} = default;
           default = pkgs.rustPlatform.buildRustPackage {
             pname = name;
-            inherit version nativeBuildInputs buildInputs;
+            inherit version;
+
+            nativeBuildInputs = with pkgs; [ pkg-config ];
+            buildInputs = with pkgs; [ fuse' openssl ];
 
             src = self;
             cargoLock.lockFile = self + "/Cargo.lock";
@@ -32,7 +33,19 @@
         };
 
         devShells.default = pkgs.mkShell {
-          inherit nativeBuildInputs buildInputs;
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          buildInputs = with pkgs; [
+            openssl
+            # Remove `/bin` to avoid conflict with SUID `fusermount` from system PATH.
+            (symlinkJoin {
+              name = "fuse-without-bin";
+              paths = [ fuse ];
+              postBuild = ''
+                rm -r $out/bin
+              '';
+            })
+          ];
+
           RUST_BACKTRACE = 1;
         };
       });
