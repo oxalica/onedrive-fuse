@@ -111,16 +111,16 @@ Note that you still need to manually [login](#prepare) first.
 
 - [ ] FUSE syscalls
   - [ ] Read
-    - [ ] access
     - [ ] forget
-    - [ ] getattr
-    - [ ] lookup
+    - [x] getattr
+    - [x] lookup
     - [ ] open
-    - [ ] opendir
+    - [x] opendir
     - [ ] read
-    - [ ] readdir
+    - [x] readdir
+    - [x] readdirplus
     - [ ] release
-    - [ ] releasedir
+    - [x] releasedir
     - [ ] statfs
   - [ ] Write
     - [ ] create
@@ -138,6 +138,8 @@ Note that you still need to manually [login](#prepare) first.
     - [ ] fsyncdir
     - init
   - Unsupported
+    - access
+      - Permission check is done by kernel via `default_permissions`.
     - bmap
     - getlk
     - getxattr

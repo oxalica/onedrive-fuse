@@ -6,7 +6,10 @@ use onedrive_api::{Auth, Permission};
 use std::io;
 use std::path::PathBuf;
 
+mod api;
 mod config;
+mod error;
+mod inode;
 mod login;
 mod paths;
 mod vfs;
