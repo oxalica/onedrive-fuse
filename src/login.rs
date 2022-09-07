@@ -2,16 +2,11 @@ use crate::config::de_duration_sec;
 use anyhow::{ensure, Context as _, Result};
 use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::{Arc, Weak},
-    time::{Duration, SystemTime},
-};
-use tokio::{
-    self,
-    sync::{RwLock, RwLockReadGuard},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, SystemTime};
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 #[derive(Debug, Deserialize)]
 pub struct ReloginConfig {

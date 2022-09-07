@@ -3,7 +3,8 @@ use anyhow::{Context as _, Result};
 use clap::{Args, Parser};
 use fuser::MountOption;
 use onedrive_api::{Auth, Permission};
-use std::{io, path::PathBuf};
+use std::io;
+use std::path::PathBuf;
 
 mod config;
 mod login;

@@ -1,8 +1,10 @@
 use crate::{login, vfs};
 use anyhow::{Context as _, Result};
 use libc::{gid_t, mode_t, uid_t};
-use serde::{de::Deserializer, Deserialize};
-use std::{path::Path, time::Duration};
+use serde::de::Deserializer;
+use serde::Deserialize;
+use std::path::Path;
+use std::time::Duration;
 
 const DEFAULT_CONFIG: &str = include_str!("../config.default.toml");
 
