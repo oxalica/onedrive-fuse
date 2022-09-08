@@ -12,7 +12,8 @@ use onedrive_api::option::CollectionOption;
 use onedrive_api::resource::DriveItemField;
 use serde::Deserialize;
 use std::ffi::OsStr;
-use std::sync::Arc;
+use std::ops::DerefMut;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const FETCH_PAGE_SIZE: usize = 512;
@@ -20,10 +21,15 @@ const FETCH_PAGE_SIZE: usize = 512;
 const BLOCK_SIZE: u64 = 512;
 const GENERATION: u64 = 0;
 
+// TODO
+const TTL: Duration = Duration::MAX;
+
 #[derive(Debug, Deserialize)]
 pub struct Config {}
 
-pub struct Vfs {
+pub struct Vfs(Arc<Mutex<VfsInner>>);
+
+struct VfsInner {
     permission: PermissionConfig,
     inodes: InodePool,
 }
@@ -35,7 +41,7 @@ impl Vfs {
         permission: PermissionConfig,
         onedrive: ManagedOnedrive,
         _client: reqwest::Client,
-    ) -> anyhow::Result<Arc<Self>> {
+    ) -> anyhow::Result<Self> {
         // FIXME: This is very temporary.
         let initial_items = {
             let onedrive = onedrive.get().await;
@@ -82,16 +88,16 @@ impl Vfs {
                 .apply_change(&item)
                 .with_context(|| format!("When processing item: {:?}", item))?;
         }
-        let this = Arc::new(Self { inodes, permission });
-        Ok(this)
+        let inner = Arc::new(Mutex::new(VfsInner { inodes, permission }));
+        Ok(Vfs(inner))
     }
 
-    fn ttl(&self) -> Duration {
-        Duration::MAX
+    fn lock(&mut self) -> impl DerefMut<Target = VfsInner> + '_ {
+        self.0.lock().unwrap()
     }
 }
 
-impl Filesystem for &'_ Vfs {
+impl Filesystem for Vfs {
     fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), libc::c_int> {
         log::info!("FUSE initialized");
         let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
@@ -106,13 +112,14 @@ impl Filesystem for &'_ Vfs {
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         match (|| -> Result<_> {
+            let vfs = self.lock();
             let name = check_file_name(name)?;
-            let ino = self.inodes.get(Ino(parent))?.data.get_child(name)?;
-            let inode = self.inodes.get(ino)?;
-            let attr = to_file_attr(ino, inode, &self.permission);
+            let ino = vfs.inodes.get(Ino(parent))?.data.get_child(name)?;
+            let inode = vfs.inodes.get(ino)?;
+            let attr = to_file_attr(ino, inode, &vfs.permission);
             Ok(attr)
         })() {
-            Ok(attr) => reply.entry(&self.ttl(), &attr, GENERATION),
+            Ok(attr) => reply.entry(&TTL, &attr, GENERATION),
             Err(e) => reply.error(e.into()),
         }
     }
@@ -120,12 +127,14 @@ impl Filesystem for &'_ Vfs {
     fn forget(&mut self, _req: &Request<'_>, _ino: u64, _nlookup: u64) {}
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
-        let ino = Ino(ino);
-        match self.inodes.get(ino) {
-            Ok(inode) => {
-                let attr = to_file_attr(ino, inode, &self.permission);
-                reply.attr(&self.ttl(), &attr)
-            }
+        match (|| -> Result<_> {
+            let vfs = self.lock();
+            let ino = Ino(ino);
+            let inode = vfs.inodes.get(ino)?;
+            let attr = to_file_attr(ino, inode, &vfs.permission);
+            Ok(attr)
+        })() {
+            Ok(attr) => reply.attr(&TTL, &attr),
             Err(err) => reply.error(err.into()),
         };
     }
@@ -185,14 +194,15 @@ impl Filesystem for &'_ Vfs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        match (|| self.inodes.get(Ino(ino))?.data.as_dir())() {
+        let vfs = self.lock();
+        match (|| vfs.inodes.get(Ino(ino))?.data.as_dir())() {
             Ok(children) => {
                 for i in (offset as usize).. {
                     let (name, &ino) = match children.get_index(i) {
                         Some(ent) => ent,
                         None => break,
                     };
-                    let child = self.inodes.get(ino).expect("Tree invariant");
+                    let child = vfs.inodes.get(ino).expect("Tree invariant");
                     let kind = match child.data.is_dir() {
                         true => FileType::Directory,
                         false => FileType::RegularFile,
@@ -215,17 +225,17 @@ impl Filesystem for &'_ Vfs {
         offset: i64,
         mut reply: ReplyDirectoryPlus,
     ) {
-        let ttl = self.ttl();
-        match (|| self.inodes.get(Ino(ino))?.data.as_dir())() {
+        let vfs = self.lock();
+        match (|| vfs.inodes.get(Ino(ino))?.data.as_dir())() {
             Ok(children) => {
                 for i in (offset as usize).. {
                     let (name, &ino) = match children.get_index(i) {
                         Some(ent) => ent,
                         None => break,
                     };
-                    let child = self.inodes.get(ino).expect("Tree invariant");
-                    let attr = to_file_attr(ino, child, &self.permission);
-                    if reply.add(ino.0, (i + 1) as i64, name, &ttl, &attr, GENERATION) {
+                    let child = vfs.inodes.get(ino).expect("Tree invariant");
+                    let attr = to_file_attr(ino, child, &vfs.permission);
+                    if reply.add(ino.0, (i + 1) as i64, name, &TTL, &attr, GENERATION) {
                         break;
                     }
                 }

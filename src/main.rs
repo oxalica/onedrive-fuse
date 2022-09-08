@@ -150,7 +150,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
             MountOption::RW
         },
     ];
-    tokio::task::spawn_blocking(move || fuser::mount2(&*vfs, &opt.mount_point, &fuse_options))
+    tokio::task::spawn_blocking(move || fuser::mount2(vfs, &opt.mount_point, &fuse_options))
         .await??;
     Ok(())
 }
