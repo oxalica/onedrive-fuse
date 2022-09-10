@@ -40,21 +40,6 @@ time_before_expire = 600
 # of `time_before_expire` reached.
 min_live_time = 60
 
-[vfs.tracker]
-# Enable incremental tracking for remote side changes periodically.
-# Any content or attributes changed on remote side will cause local cache to be updated or invalidated.
-# If tracking is disabled, we assume that nothing can be changed on remote side once fetched,
-# otherwise, it will lead to inconsistency.
-# Note: When this is `false`, initial state will still be fetched during initialization.
-enable = true
-# Period in seconds to poll change events.
-period = 10
-# Page size when fetching changes.
-fetch_page_size = 512
-
-[vfs.statfs]
-# Whether to enable auto-refresh on statfs information.
-# If disabled, it will only be fetched in first statfs call and will be kept forever.
-enable_auto_refresh = true
-# Refresh period in seconds.
-refresh_period = 60
+[vfs]
+# Period in seconds to commit changes.
+commit_period = 10

@@ -124,7 +124,7 @@ Note that you still need to manually [login](#prepare) first.
     - [ ] statfs
   - [ ] Write
     - [ ] create
-    - [ ] mkdir
+    - [x] mkdir
     - [ ] open
     - [ ] rename
     - [ ] rmdir

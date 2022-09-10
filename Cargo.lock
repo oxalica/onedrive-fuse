@@ -692,12 +692,14 @@ dependencies = [
  "indexmap",
  "libc",
  "log",
+ "mime",
  "nix",
  "onedrive-api",
  "open",
  "reqwest",
  "sd-notify",
  "serde",
+ "serde-aux",
  "serde_json",
  "slab",
  "tokio",
@@ -983,6 +985,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f747710de3dcd43b88c9168773254e809d8ddbdf9653b84e2554ab219f17860"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde-aux"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c79c1a5a310c28bf9f7a4b9bd848553051120d80a5952f993c7eb62f6ed6e4c5"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

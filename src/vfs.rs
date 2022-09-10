@@ -1,7 +1,7 @@
 use crate::api;
-use crate::config::PermissionConfig;
+use crate::config::{de_duration_sec, PermissionConfig};
 use crate::error::{Error, Result};
-use crate::inode::{check_file_name, Ino, Inode, InodePool};
+use crate::inode::{check_file_name, Ino, Inode, InodeChange, InodePool};
 use crate::login::ManagedOnedrive;
 use anyhow::Context;
 use fuser::{
@@ -11,8 +11,9 @@ use fuser::{
 use serde::Deserialize;
 use std::ffi::OsStr;
 use std::ops::DerefMut;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, SystemTime};
+use tokio::time::{interval, MissedTickBehavior};
 
 const BLOCK_SIZE: u64 = 512;
 const GENERATION: u64 = 0;
@@ -21,24 +22,28 @@ const GENERATION: u64 = 0;
 const TTL: Duration = Duration::MAX;
 
 #[derive(Debug, Deserialize)]
-pub struct Config {}
+pub struct Config {
+    #[serde(deserialize_with = "de_duration_sec")]
+    commit_period: Duration,
+}
 
 pub struct Vfs(Arc<Mutex<VfsInner>>);
 
 struct VfsInner {
     permission: PermissionConfig,
+    onedrive: ManagedOnedrive,
     inodes: InodePool,
 }
 
 impl Vfs {
     // TODO
     pub async fn new(
-        _config: Config,
+        config: Config,
         permission: PermissionConfig,
         onedrive: ManagedOnedrive,
         _client: reqwest::Client,
     ) -> anyhow::Result<Self> {
-        let initial_items = {
+        let (initial_items, delta_link) = {
             let onedrive = onedrive.get().await;
             let token = onedrive.access_token();
             let client = onedrive.client();
@@ -47,7 +52,7 @@ impl Vfs {
             let mut resp: api::DeltaResponse =
                 api::DeltaRequest::initial().send(client, token).await?;
             let mut initial_items = Vec::new();
-            let _delta_link = loop {
+            let delta_link = loop {
                 log::info!("Got {} items", resp.value.len());
                 initial_items.extend(
                     resp.value
@@ -66,7 +71,7 @@ impl Vfs {
                 }
             };
 
-            initial_items
+            (initial_items, delta_link)
         };
 
         let mut initial_items = initial_items.into_iter();
@@ -80,12 +85,123 @@ impl Vfs {
                 .with_context(|| format!("When processing item: {:?}", item))?;
         }
 
-        let inner = Arc::new(Mutex::new(VfsInner { inodes, permission }));
+        let inner = Arc::new(Mutex::new(VfsInner {
+            inodes,
+            onedrive,
+            permission,
+        }));
+        tokio::spawn(Self::commit_thread(
+            Arc::downgrade(&inner),
+            delta_link,
+            config.commit_period,
+        ));
         Ok(Vfs(inner))
     }
 
     fn lock(&mut self) -> impl DerefMut<Target = VfsInner> + '_ {
         self.0.lock().unwrap()
+    }
+
+    async fn commit_thread(
+        this: Weak<Mutex<VfsInner>>,
+        mut delta_link: api::ApiRelativeUrl,
+        period: Duration,
+    ) {
+        let mut interval = interval(period);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+
+            // Take VFS changes from last commit.
+            let (onedrive, changes) = {
+                let this = match this.upgrade() {
+                    Some(this) => this,
+                    None => break,
+                };
+                let mut this = this.lock().unwrap();
+                let changes = this.inodes.take_changes();
+                if changes.is_empty() {
+                    continue;
+                }
+                (this.onedrive.clone(), changes)
+            };
+
+            // Prepare requests.
+            let requests = changes
+                .into_iter()
+                .map(|change| match change {
+                    InodeChange::CreateDir { path } => api::CreateDir::new(&path),
+                })
+                .chain(Some(api::DeltaRequest::link(delta_link)))
+                .collect::<Vec<_>>();
+
+            // Prepare client.
+            let (client, token) = {
+                let onedrive = onedrive.get().await;
+                (
+                    onedrive.client().clone(),
+                    onedrive.access_token().to_owned(),
+                )
+            };
+
+            log::info!("Committing {} requests", requests.len());
+
+            // Batch requests.
+            let mut last_resp = None;
+            for chunk in requests.chunks(api::BatchRequest::MAX_LEN) {
+                log::debug!("Batching: {:?}", chunk);
+
+                let mut resps = match api::BatchRequest::sequential(chunk.iter().cloned())
+                    .send::<api::BatchResponse>(&client, &token)
+                    .await
+                {
+                    Ok(resp) => resp.responses,
+                    Err(err) => todo!("Request failed: {}", err),
+                };
+                resps.sort_by_key(|resp| resp.id);
+                for resp in &resps {
+                    if !resp.status.is_success() {
+                        todo!("Request failed: {}", resp.status);
+                    }
+                }
+                last_resp = resps.pop();
+            }
+            let delta_resp = last_resp
+                .and_then(|resp| resp.body)
+                .expect("Missing responses");
+            let mut delta_resp =
+                serde_json::from_value::<api::DeltaResponse>(delta_resp).expect("Invalid response");
+
+            // Fetch all delta changes.
+            let mut delta_items = delta_resp.value;
+            while let Some(next_link) = delta_resp.next_link {
+                delta_resp = match api::DeltaRequest::link(next_link)
+                    .send::<api::DeltaResponse>(&client, &token)
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(err) => todo!("Request failed: {}", err),
+                };
+                delta_items.extend(delta_resp.value);
+            }
+            delta_link = delta_resp.delta_link.expect("Missing delta link");
+
+            log::debug!("Got changes: {:#?}", delta_items);
+
+            // Apply remote changes.
+            {
+                let this = match this.upgrade() {
+                    Some(this) => this,
+                    None => break,
+                };
+                let mut this = this.lock().unwrap();
+                for item in delta_items {
+                    this.inodes.apply_change(&item).expect("Protocol error");
+                }
+            }
+
+            log::info!("Tree synchronized");
+        }
     }
 }
 
@@ -233,6 +349,29 @@ impl Filesystem for Vfs {
                 }
                 reply.ok()
             }
+            Err(e) => reply.error(e.into()),
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let mut vfs = self.lock();
+        match (|| -> Result<_> {
+            let name = check_file_name(name)?;
+            let created_time = SystemTime::now();
+            let ino = vfs.inodes.create_dir(Ino(parent), name, created_time)?;
+            let inode = vfs.inodes.get(ino).expect("Created");
+            let attr = to_file_attr(ino, inode, &vfs.permission);
+            Ok(attr)
+        })() {
+            Ok(attr) => reply.entry(&TTL, &attr, GENERATION),
             Err(e) => reply.error(e.into()),
         }
     }

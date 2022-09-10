@@ -20,12 +20,14 @@ humantime-serde = "1.1.1"
 indexmap = "1.9.1"
 libc = "0.2.69"
 log = "0.4.8"
+mime = "0.3.16"
 nix = "0.25"
 onedrive-api = "0.8.1"
 open = "3"
 reqwest = "0.11.0"
 sd-notify = "0.4.1"
 serde = { version = "1.0.106", features = ["derive"] }
+serde-aux = { version = "4.0.0", default-features = false }
 serde_json = "1.0.51"
 slab = "0.4.7"
 tokio = { version = "1.0.2", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
