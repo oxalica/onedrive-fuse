@@ -1,4 +1,4 @@
-use crate::api::DriveItem;
+use crate::api;
 use crate::config::PermissionConfig;
 use crate::error::{Error, Result};
 use crate::inode::{check_file_name, Ino, Inode, InodePool};
@@ -8,15 +8,11 @@ use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, ReplyAttr, ReplyDirectory, ReplyDirectoryPlus,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyXattr, Request,
 };
-use onedrive_api::option::CollectionOption;
-use onedrive_api::resource::DriveItemField;
 use serde::Deserialize;
 use std::ffi::OsStr;
 use std::ops::DerefMut;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-const FETCH_PAGE_SIZE: usize = 512;
 
 const BLOCK_SIZE: u64 = 512;
 const GENERATION: u64 = 0;
@@ -42,39 +38,34 @@ impl Vfs {
         onedrive: ManagedOnedrive,
         _client: reqwest::Client,
     ) -> anyhow::Result<Self> {
-        // FIXME: This is very temporary.
         let initial_items = {
             let onedrive = onedrive.get().await;
-            let mut fetcher = onedrive
-                .track_root_changes_from_initial_with_option(
-                    CollectionOption::default()
-                        .page_size(FETCH_PAGE_SIZE)
-                        .select(&[
-                            DriveItemField::id,
-                            DriveItemField::name,
-                            DriveItemField::size,
-                            DriveItemField::folder,
-                            DriveItemField::special_folder,
-                            DriveItemField::parent_reference,
-                            DriveItemField::last_modified_date_time,
-                            DriveItemField::created_date_time,
-                        ]),
-                )
-                .await?;
+            let token = onedrive.access_token();
+            let client = onedrive.client();
+
+            log::info!("Fetching tree");
+            let mut resp: api::DeltaResponse =
+                api::DeltaRequest::initial().send(client, token).await?;
             let mut initial_items = Vec::new();
-            while let Some(page) = fetcher.fetch_next_page(&onedrive).await? {
-                log::info!("Fetched {} initial delta items", page.len());
-                for item in page {
-                    if item.special_folder.is_some() {
-                        continue;
+            let _delta_link = loop {
+                log::info!("Got {} items", resp.value.len());
+                initial_items.extend(
+                    resp.value
+                        .into_iter()
+                        .filter(|item| item.special_folder.is_none()),
+                );
+
+                match (resp.next_link, resp.delta_link) {
+                    (Some(next_link), _) => {
+                        resp = api::DeltaRequest::link(next_link)
+                            .send(client, token)
+                            .await?;
                     }
-                    // FIXME: Very inefficient.
-                    let orig = serde_json::to_value(item).unwrap();
-                    log::debug!("{:?}", orig);
-                    let item = serde_json::from_value::<DriveItem>(orig)?;
-                    initial_items.push(item);
+                    (None, Some(delta_link)) => break delta_link,
+                    (None, None) => return Err(Error::from("Missing delta link").into()),
                 }
-            }
+            };
+
             initial_items
         };
 
@@ -88,6 +79,7 @@ impl Vfs {
                 .apply_change(&item)
                 .with_context(|| format!("When processing item: {:?}", item))?;
         }
+
         let inner = Arc::new(Mutex::new(VfsInner { inodes, permission }));
         Ok(Vfs(inner))
     }
