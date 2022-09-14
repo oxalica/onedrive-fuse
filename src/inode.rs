@@ -17,14 +17,48 @@ pub struct Inode {
     parent: Option<(Ino, usize)>,
     dirty: Cell<bool>,
     /// The remote id of this inode. For newly created inode, this is None.
-    pub id: Option<String>,
-    pub size: u64,
-    pub last_modified_time: SystemTime,
-    pub created_time: SystemTime,
-    pub data: InodeData,
+    id: Option<String>,
+    size: u64,
+    last_modified_time: SystemTime,
+    created_time: SystemTime,
+    data: InodeData,
 }
 
 impl Inode {
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn created_time(&self) -> SystemTime {
+        self.created_time
+    }
+
+    pub fn last_modified_time(&self) -> SystemTime {
+        self.last_modified_time
+    }
+
+    pub fn is_dir(&self) -> bool {
+        matches!(self.data, InodeData::Dir(..))
+    }
+
+    pub fn as_dir(&self) -> Result<&IndexMap<String, Ino>> {
+        match &self.data {
+            InodeData::Dir(children) => Ok(children),
+            InodeData::File => Err(Error::IsNotDirectory),
+        }
+    }
+
+    pub fn as_dir_mut(&mut self) -> Result<&mut IndexMap<String, Ino>> {
+        match &mut self.data {
+            InodeData::Dir(children) => Ok(children),
+            InodeData::File => Err(Error::IsNotDirectory),
+        }
+    }
+
+    pub fn get_child(&self, name: &str) -> Result<Ino> {
+        self.as_dir()?.get(name).ok_or(Error::NotFound).copied()
+    }
+
     fn update_meta(&mut self, item: &DriveItem) {
         if item.folder.is_none() {
             self.size = item.size.unwrap_or(0);
@@ -38,30 +72,6 @@ impl Inode {
 pub enum InodeData {
     Dir(IndexMap<String, Ino>),
     File,
-}
-
-impl InodeData {
-    pub fn is_dir(&self) -> bool {
-        matches!(self, Self::Dir(..))
-    }
-
-    pub fn as_dir(&self) -> Result<&IndexMap<String, Ino>> {
-        match self {
-            Self::Dir(children) => Ok(children),
-            Self::File => Err(Error::IsNotDirectory),
-        }
-    }
-
-    pub fn as_dir_mut(&mut self) -> Result<&mut IndexMap<String, Ino>> {
-        match self {
-            Self::Dir(children) => Ok(children),
-            Self::File => Err(Error::IsNotDirectory),
-        }
-    }
-
-    pub fn get_child(&self, name: &str) -> Result<Ino> {
-        self.as_dir()?.get(name).ok_or(Error::NotFound).copied()
-    }
 }
 
 #[derive(Debug)]
@@ -118,7 +128,6 @@ impl InodePool {
         let parent_children = self
             .get_mut(parent_ino)
             .expect("Tree invariant")
-            .data
             .as_dir_mut()
             .expect("Tree invariant");
         parent_children.swap_remove_index(old_idx);
@@ -131,7 +140,7 @@ impl InodePool {
 
     fn reparent(&mut self, ino: Ino, new_parent: Ino, new_name: String) -> Result<()> {
         // Validate the target first.
-        if let Some(&target_ino) = self.get(new_parent)?.data.as_dir()?.get(&new_name) {
+        if let Some(&target_ino) = self.get(new_parent)?.as_dir()?.get(&new_name) {
             // No-op
             if target_ino == ino {
                 return Ok(());
@@ -146,7 +155,6 @@ impl InodePool {
         let new_children = self
             .get_mut(new_parent)
             .expect("Checked early")
-            .data
             .as_dir_mut()
             .expect("Checked early");
         let (new_idx, _) = new_children.insert_full(new_name, ino);
@@ -173,7 +181,7 @@ impl InodePool {
             .parent_reference
             .as_ref()
             .and_then(|parent| self.id_map.get(&parent.id).copied())
-            .filter(|&parent_ino| self.get(parent_ino).expect("Tree invariant").data.is_dir());
+            .filter(|&parent_ino| self.get(parent_ino).expect("Tree invariant").is_dir());
         let parent_ino = match maybe_parent_ino {
             // Parent is valid, and the item is not deleted.
             Some(parent_ino) if item.deleted.is_none() => parent_ino,
@@ -185,7 +193,7 @@ impl InodePool {
                         log::debug!("Item deleted: {:?}", item);
                         self.detach(ino).expect("From id map and is not root");
                         let inode = self.pool.remove(ino.0 as usize);
-                        if inode.data.is_dir() {
+                        if inode.is_dir() {
                             return Err("Recursive deletion".into());
                         }
                     }
@@ -207,7 +215,6 @@ impl InodePool {
         let parent_children = self
             .get_mut(parent_ino)
             .unwrap()
-            .data
             .as_dir_mut()
             .expect("Checked");
 
@@ -266,7 +273,7 @@ impl InodePool {
             assert!(!path.is_empty(), "Root is always present");
             changes.push(InodeChange::CreateDir { path: path.clone() })
         }
-        let children = match inode.data.as_dir() {
+        let children = match inode.as_dir() {
             Ok(children) => children,
             Err(_) => return,
         };
@@ -283,7 +290,7 @@ impl InodePool {
         let ino = Ino(self.pool.vacant_key() as u64);
 
         // Check the destination.
-        let children = self.get_mut(parent)?.data.as_dir_mut()?;
+        let children = self.get_mut(parent)?.as_dir_mut()?;
         if children.contains_key(name) {
             return Err(Error::FileExists);
         }

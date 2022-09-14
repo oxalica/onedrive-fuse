@@ -222,7 +222,7 @@ impl Filesystem for Vfs {
         match (|| -> Result<_> {
             let vfs = self.lock();
             let name = check_file_name(name)?;
-            let ino = vfs.inodes.get(Ino(parent))?.data.get_child(name)?;
+            let ino = vfs.inodes.get(Ino(parent))?.get_child(name)?;
             let inode = vfs.inodes.get(ino)?;
             let attr = to_file_attr(ino, inode, &vfs.permission);
             Ok(attr)
@@ -303,7 +303,7 @@ impl Filesystem for Vfs {
         mut reply: ReplyDirectory,
     ) {
         let vfs = self.lock();
-        match (|| vfs.inodes.get(Ino(ino))?.data.as_dir())() {
+        match (|| vfs.inodes.get(Ino(ino))?.as_dir())() {
             Ok(children) => {
                 for i in (offset as usize).. {
                     let (name, &ino) = match children.get_index(i) {
@@ -311,7 +311,7 @@ impl Filesystem for Vfs {
                         None => break,
                     };
                     let child = vfs.inodes.get(ino).expect("Tree invariant");
-                    let kind = match child.data.is_dir() {
+                    let kind = match child.is_dir() {
                         true => FileType::Directory,
                         false => FileType::RegularFile,
                     };
@@ -334,7 +334,7 @@ impl Filesystem for Vfs {
         mut reply: ReplyDirectoryPlus,
     ) {
         let vfs = self.lock();
-        match (|| vfs.inodes.get(Ino(ino))?.data.as_dir())() {
+        match (|| vfs.inodes.get(Ino(ino))?.as_dir())() {
             Ok(children) => {
                 for i in (offset as usize).. {
                     let (name, &ino) = match children.get_index(i) {
@@ -380,19 +380,19 @@ impl Filesystem for Vfs {
 fn to_file_attr(ino: Ino, inode: &Inode, perm: &PermissionConfig) -> FileAttr {
     FileAttr {
         ino: ino.0,
-        size: inode.size,
-        blocks: (inode.size + (BLOCK_SIZE - 1)) / BLOCK_SIZE,
+        size: inode.size(),
+        blocks: (inode.size() + (BLOCK_SIZE - 1)) / BLOCK_SIZE,
         // No data.
-        atime: inode.last_modified_time,
-        mtime: inode.last_modified_time,
+        atime: inode.last_modified_time(),
+        mtime: inode.last_modified_time(),
         // No data.
-        ctime: inode.last_modified_time,
-        crtime: inode.created_time,
-        kind: match inode.data.is_dir() {
+        ctime: inode.last_modified_time(),
+        crtime: inode.created_time(),
+        kind: match inode.is_dir() {
             true => FileType::Directory,
             false => FileType::RegularFile,
         },
-        perm: match inode.data.is_dir() {
+        perm: match inode.is_dir() {
             true => perm.dir_permission() as u16,
             false => perm.file_permission() as u16,
         },
