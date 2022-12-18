@@ -704,6 +704,9 @@ impl DiskCache {
                 if item.folder.is_some() {
                     continue;
                 }
+                if item.file.is_none() {
+                    continue;
+                }
 
                 let id = item.id.clone().expect("Missing id");
                 let file = match cache.get_mut(&id) {
