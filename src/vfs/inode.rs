@@ -213,6 +213,7 @@ impl InodePool {
         DriveItemField::deleted,
         // InodeAttr.
         DriveItemField::size,
+        DriveItemField::file,
         DriveItemField::file_system_info,
         DriveItemField::folder,
     ];
@@ -457,6 +458,9 @@ impl InodePool {
         let mut dir_marked_deleted = HashSet::new();
 
         for item in updated {
+            if !(item.file.is_some() || item.folder.is_some()) {
+                continue;
+            }
             let item_id = item.id.as_ref().expect("Missing id");
 
             // Remove an existing item.
