@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
     match opt {
         Opt::Login(opt) => main_login(opt).await,
         Opt::Mount(opt) => main_mount(opt).await,
@@ -155,8 +155,8 @@ async fn main_mount(opt: OptMount) -> Result<()> {
 }
 
 #[derive(Debug, Parser)]
-#[clap(about = "Mount OneDrive storage as FUSE filesystem.")]
-#[clap(after_help = concat!("\
+#[command(about = "Mount OneDrive storage as FUSE filesystem.")]
+#[command(after_help = concat!("\
 Copyright (C) 2019-2022, Oxalica
 This is free software; see the source for copying conditions. There is NO warranty;
 not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -169,7 +169,7 @@ enum Opt {
 }
 
 #[derive(Debug, Args)]
-#[clap(after_help = "\
+#[command(after_help = "\
 EXAMPLES:
     # Login with some client id.
     onedrive-fuse --client-id 00000000-0000-0000-0000-000000000000
@@ -180,15 +180,15 @@ EXAMPLES:
 struct OptLogin {
     /// Secret credential file to save your logined OneDrive account.
     /// Default to be `$HOME/.onedrive/credential.json`.
-    #[clap(short, long, parse(from_os_str))]
+    #[arg(short, long)]
     credential: Option<PathBuf>,
 
     /// The client id used for OAuth2.
-    #[clap(long)]
+    #[arg(long)]
     client_id: String,
 
     /// Request for read-write instead of read-only permission.
-    #[clap(short = 'w', long)]
+    #[arg(short = 'w', long)]
     read_write: bool,
 
     /// The login code for Code-Auth.
@@ -198,7 +198,7 @@ struct OptLogin {
 }
 
 #[derive(Debug, Args)]
-#[clap(after_help = "\
+#[command(after_help = "\
 EXAMPLES:
     # Using default credential file to mount OneDrive on `~/mnt`.
     onedrive-fuse mount ~/mnt
@@ -212,20 +212,19 @@ EXAMPLES:
 struct OptMount {
     /// Secret credential file to login OneDrive account.
     /// Default to be `$HOME/.onedrive_fuse/credential.json`.
-    #[clap(short, long, parse(from_os_str))]
+    #[arg(short, long)]
     credential: Option<PathBuf>,
 
     /// Config file to override default settings.
     /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
-    #[clap(long, parse(from_os_str))]
+    #[arg(long)]
     config: Option<PathBuf>,
 
     /// Mount point.
-    #[clap(parse(from_os_str))]
     mount_point: PathBuf,
 
     /// Options to override default settings.
     /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
-    #[clap(short, long)]
+    #[arg(short, long)]
     option: Vec<String>,
 }
