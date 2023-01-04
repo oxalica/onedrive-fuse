@@ -9,30 +9,31 @@
   outputs = { self, flake-utils, nixpkgs }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        inherit (builtins) readFile fromTOML;
+        inherit (nixpkgs) lib;
         pkgs = nixpkgs.legacyPackages.${system};
-        manifest = fromTOML (readFile (self + "/Cargo.toml"));
+        manifest = lib.importTOML (self + "/Cargo.toml");
 
         inherit (manifest.package) name version;
-        nativeBuildInputs = with pkgs; [ pkg-config ];
-        buildInputs = with pkgs; [ fuse openssl ];
 
-      in {
+      in rec {
         packages = rec {
           ${name} = default;
           default = pkgs.rustPlatform.buildRustPackage {
             pname = name;
-            inherit version nativeBuildInputs buildInputs;
+            inherit version;
+
+            nativeBuildInputs = with pkgs; [ pkg-config ];
+            buildInputs = with pkgs; [ fuse openssl ];
 
             src = self;
             cargoLock.lockFile = self + "/Cargo.lock";
 
-            meta.license = nixpkgs.lib.licenses.mit;
+            meta.license = lib.licenses.mit;
           };
         };
 
         devShells.default = pkgs.mkShell {
-          inherit nativeBuildInputs buildInputs;
+          inputsFrom = [ packages.default ];
           RUST_BACKTRACE = 1;
         };
       });
