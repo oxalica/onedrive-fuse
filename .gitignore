@@ -1,6 +1,7 @@
 /target
 /.vscode
 .env
+.envrc
 
 result*
 perf.data*
