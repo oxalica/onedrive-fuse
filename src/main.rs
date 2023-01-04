@@ -157,7 +157,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
 #[derive(Debug, Parser)]
 #[command(about = "Mount OneDrive storage as FUSE filesystem.")]
 #[command(after_help = concat!("\
-Copyright (C) 2019-2022, Oxalica
+Copyright (C) 2019-2023, Oxalica
 This is free software; see the source for copying conditions. There is NO warranty;
 not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 "))]
