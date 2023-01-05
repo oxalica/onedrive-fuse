@@ -19,7 +19,7 @@
         inherit (manifest.package) name version;
 
         nativeBuildInputs = with pkgs; [ pkg-config ];
-        buildInputs = with pkgs; [ fuse openssl ];
+        buildInputs = with pkgs; [ fuse3 openssl ];
 
       in {
         packages = rec {
