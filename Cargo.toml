@@ -1,6 +1,6 @@
 [package]
 name = "onedrive-fuse"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 repository = "https://github.com/oxalica/onedrive-fuse"
 keywords = ["onedrive", "fuse"]
