@@ -4,6 +4,7 @@ use clap::{Args, Parser};
 use fuser::MountOption;
 use onedrive_api::{Auth, Permission};
 use std::{io, path::PathBuf};
+use url::Url;
 
 mod config;
 mod fuse_fs;
@@ -76,7 +77,7 @@ Your browser should be opened. If not, please manually open the link below:
 {}
 
 Login to your OneDrive (Microsoft) Account in the link, it will jump to a blank page
-whose URL contains `nativeclient?code=`.
+whose URL contains `code=`.
 ",
         auth_url
     );
@@ -87,13 +88,21 @@ whose URL contains `nativeclient?code=`.
         );
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
-        let line = line.trim();
-
-        const NEEDLE: &str = "nativeclient?code=";
-        match line.find(NEEDLE) {
-            Some(pos) => return Ok(line[pos + NEEDLE.len()..].to_owned()),
-            _ => eprintln!("Invalid URL."),
+        let ret = (|| -> Option<String> {
+            let url = line.trim().parse::<Url>().ok()?;
+            let v = url
+                .query_pairs()
+                .find_map(|(k, v)| (k == "code" && !v.is_empty()).then_some(v))?;
+            // Sanity check.
+            if v.is_empty() {
+                return None;
+            }
+            Some(v.into_owned())
+        })();
+        if let Some(code) = ret {
+            return Ok(code);
         }
+        eprintln!("Invalid URL.")
     }
 }
 
