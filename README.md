@@ -39,10 +39,11 @@ Mount [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     $ onedrive-fuse login --read-write --client-id <paste-your-client-id-here>
     ```
 
-    This will prompt a browser window to ask you to login your Microsoft account for OneDrive.
-    After a successful login, the page will redirect your to a blank page
-    whose URL contains `nativeclient?code=`.
-    Copy the **FULL** URL, and paste it to the terminal and press enter to login.
+    This will prompt a browser window to ask you to login your Microsoft
+    account for OneDrive. After a successful login, the web page will pass the
+    result token back to onedrive-fuse automatically, and prints
+    `Login successfully.` You can close the web page now, and the command
+    running above should also have exited successfully.
 
     Your access token will be saved under [XDG config directory][xdg-dirs],
     which is by default `~/.config/onedrive-fuse/credential.json`.

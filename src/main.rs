@@ -1,9 +1,9 @@
 use crate::login::ManagedOnedrive;
-use anyhow::{Context as _, Result};
+use anyhow::{anyhow, Context as _, Result};
 use clap::{Args, Parser};
 use fuser::MountOption;
-use onedrive_api::{Auth, Permission};
-use std::{io, path::PathBuf};
+use onedrive_api::{Auth, Permission, TokenResponse};
+use std::path::PathBuf;
 use url::Url;
 
 mod config;
@@ -30,7 +30,8 @@ async fn main() -> Result<()> {
     }
 }
 
-const REDIRECT_URI: &str = "https://login.microsoftonline.com/common/oauth2/nativeclient";
+const REDIRECT_URI: &str = "http://localhost:0/onedrive-fuse-login";
+const HTTP_SERVER_PATH: &str = "/onedrive-fuse-login";
 
 async fn main_login(opt: OptLogin) -> Result<()> {
     let credential_path = opt
@@ -38,22 +39,27 @@ async fn main_login(opt: OptLogin) -> Result<()> {
         .or_else(paths::default_credential_path)
         .context("No credential file provided to save to")?;
 
-    let auth = Auth::new(
-        opt.client_id.clone(),
-        Permission::new_read()
-            .write(opt.read_write)
-            .offline_access(true),
-        REDIRECT_URI.to_owned(),
-    );
+    let perm = if opt.read_write {
+        "READONLY"
+    } else {
+        "READWRITE"
+    };
+    eprintln!("You are logining for {perm} permission.");
 
-    let code = match opt.code {
-        Some(code) => code,
-        None => ask_for_code(&auth.code_auth_url())?,
+    let perm = Permission::new_read()
+        .write(opt.read_write)
+        .offline_access(true);
+
+    let tokens = if let Some(code) = &opt.code {
+        eprintln!("Logining...");
+        let auth = Auth::new(opt.client_id.clone(), perm, REDIRECT_URI.to_owned());
+        auth.login_with_code(code, None).await?
+    } else {
+        let client_id = opt.client_id.clone();
+        tokio::task::spawn_blocking(|| login_with_http_server(client_id, perm)).await??
     };
 
-    eprintln!("Logining...");
-    let token_resp = auth.login_with_code(&code, None).await?;
-    let refresh_token = token_resp.refresh_token.expect("Missing refresh token");
+    let refresh_token = tokens.refresh_token.expect("Missing refresh token");
 
     eprintln!("Login successfully, saving credential...");
 
@@ -69,40 +75,83 @@ async fn main_login(opt: OptLogin) -> Result<()> {
     Ok(())
 }
 
-fn ask_for_code(auth_url: &str) -> Result<String> {
-    let _ = open::that(auth_url);
+fn login_with_http_server(client_id: String, perm: Permission) -> Result<TokenResponse> {
+    use http::StatusCode;
+    use std::io::Cursor;
+    use tiny_http::{Header, Response, Server};
+
+    let server = Server::http("localhost:0")
+        .map_err(|err| anyhow!("Failed to listen on localhost: {err}"))?;
+    let listen_addr = server.server_addr().to_ip().expect("Listen on IP address");
+    eprintln!("Listening at {listen_addr} for callback");
+
+    // NB. The host must be exactly `localhost`, which is special to Microsoft API.
+    let redirect_uri = format!(
+        "http://localhost:{}{}",
+        listen_addr.port(),
+        HTTP_SERVER_PATH
+    );
+    let auth = Auth::new(client_id, perm, redirect_uri);
+    let auth_url = auth.code_auth_url();
+
+    let _ = open::that(&auth_url);
     eprintln!(
         "\
-Your browser should be opened. If not, please manually open the link below:
-{}
+Please login to your OneDrive (Microsoft) Account in browser.
+Your browser should be opened with the login page. If not, please manually open the link below:
 
-Login to your OneDrive (Microsoft) Account in the link, it will jump to a blank page
-whose URL contains `code=`.
-",
-        auth_url
+{auth_url}
+
+"
     );
 
+    let base_url = Url::parse("http://localhost/").unwrap();
     loop {
-        eprintln!(
-            "Please copy and paste the FULL URL of the blank page here and then press ENTER:"
-        );
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        let ret = (|| -> Option<String> {
-            let url = line.trim().parse::<Url>().ok()?;
-            let v = url
-                .query_pairs()
-                .find_map(|(k, v)| (k == "code" && !v.is_empty()).then_some(v))?;
-            // Sanity check.
-            if v.is_empty() {
-                return None;
-            }
-            Some(v.into_owned())
-        })();
-        if let Some(code) = ret {
-            return Ok(code);
+        let req = server.recv()?;
+
+        // Unrecognized path. May be unrelated requests from the browser.
+        if !req.url().starts_with(HTTP_SERVER_PATH) {
+            let _ = req.respond(Response::empty(StatusCode::NOT_FOUND.as_u16()));
+            continue;
         }
-        eprintln!("Invalid URL.")
+
+        let ret = (|| -> Result<_> {
+            let url = base_url.join(req.url()).context("Invalid URL")?;
+            let code = url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "code" && !value.is_empty()).then_some(value))
+                .context("Missing code")?;
+            eprintln!("Logining...");
+            let tokens =
+                tokio::runtime::Handle::current().block_on(auth.login_with_code(&code, None))?;
+            Ok(tokens)
+        })();
+        let headers =
+            vec![Header::from_bytes("content-type", "text/plain; charset=utf-8").unwrap()];
+        let (status, ret_str) = match &ret {
+            Ok(_) => (
+                StatusCode::OK,
+                "Login successfully. You can close this page now.".to_owned(),
+            ),
+            Err(err) => {
+                println!("{err:#}");
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Login failed. Please close this page and try again.\n{err:#}"),
+                )
+            }
+        };
+        let _ = req.respond(Response::new(
+            status.as_u16().into(),
+            headers,
+            Cursor::new(ret_str),
+            None,
+            None,
+        ));
+
+        if let Ok(ret) = ret {
+            return Ok(ret);
+        }
     }
 }
 
@@ -200,9 +249,14 @@ struct OptLogin {
     #[arg(short = 'w', long)]
     read_write: bool,
 
+    /// Whether to disable listening on `localhost` for login callback. This will require manually
+    /// type the redirected URI to the terminal after login in browser.
+    /// Only use this when you are unable to interact with browser on the same compuler (host).
+    #[arg(long)]
+    no_listen: bool,
+
     /// The login code for Code-Auth.
-    /// If not provided, the program will interactively open your browser and
-    /// ask for the redirected URL containing it.
+    /// If not provided, the program will do interactive login.
     code: Option<String>,
 }
 
