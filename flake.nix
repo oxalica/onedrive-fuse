@@ -1,4 +1,4 @@
-{
+rec {
   description = "Mount Microsoft OneDrive storage as FUSE filesystem";
 
   inputs = {
@@ -31,7 +31,11 @@
             src = self;
             cargoLock.lockFile = self + "/Cargo.lock";
 
-            meta.license = lib.licenses.mit;
+            meta = {
+              inherit description;
+              homepage = manifest.package.repository;
+              license = lib.licenses.gpl3Only;
+            };
           };
         };
 
