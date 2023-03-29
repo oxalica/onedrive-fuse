@@ -13,7 +13,7 @@ anyhow = "1.0.28"
 bytes = "1.0.1"
 clap = { version = "4.0.32", features = ["derive"] }
 config = { version = "0.13", default-features = false, features = ["toml"] }
-dirs = "4.0.0"
+dirs = "5.0.0"
 env_logger = "0.10.0"
 fuser = "0.12.0"
 http = "0.2.1"
@@ -24,7 +24,7 @@ log = "0.4.8"
 lru-cache = "0.1.2"
 nix = "0.26.1"
 onedrive-api = "0.9.0"
-open = "3.2.0"
+open = "4.0.1"
 reqwest = "0.11.0"
 sd-notify = "0.4.1"
 serde = { version = "1.0.106", features = ["derive"] }
