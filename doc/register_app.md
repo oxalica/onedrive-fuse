@@ -14,10 +14,9 @@ Steps:
 2. Fill the form.
    - `Name` can be randomly chosen.
 
-   - `Supported account types` should be `Personal Microsoft accounts only`.
+   - `Supported account types` should be `Accounts in any organizational directory (Any Azure AD directory - Multitenant) and personal Microsoft accounts (e.g. Skype, Xbox)`.
 
-     I'm not sure whether other account types are supported since I have no
-     organizational accounts for testing.
+     This will ensure support for organisational accounts as well as personal.
 
    - `Redirect URI` should be `Public client/native (mobile & desktop)` (chosen
      from the left list),
