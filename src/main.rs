@@ -11,6 +11,7 @@ mod fuse_fs;
 mod login;
 mod paths;
 mod vfs;
+mod vfs2;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -178,17 +179,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
 
     let onedrive =
         ManagedOnedrive::login(client, credential_path, config.relogin, readonly).await?;
-    let vfs = vfs::Vfs::new(
-        fuser::FUSE_ROOT_ID,
-        readonly,
-        config.vfs,
-        onedrive.clone(),
-        unlimit_client,
-    )
-    .await
-    .context("Failed to initialize vfs")?;
 
-    log::info!("Mounting...");
     let fuse_options = [
         MountOption::FSName("onedrive".into()),
         MountOption::DefaultPermissions, // Check permission in the kernel.
@@ -206,9 +197,33 @@ async fn main_mount(opt: OptMount) -> Result<()> {
             MountOption::RW
         },
     ];
-    let fs = fuse_fs::Filesystem::new(vfs, config.permission);
-    tokio::task::spawn_blocking(move || fuser::mount2(fs, &opt.mount_point, &fuse_options))
-        .await??;
+
+    if !opt.experimental_vfs2 {
+        let vfs = vfs::Vfs::new(
+            fuser::FUSE_ROOT_ID,
+            readonly,
+            config.vfs,
+            onedrive.clone(),
+            unlimit_client,
+        )
+        .await
+        .context("Failed to initialize vfs")?;
+        let fs = fuse_fs::Filesystem::new(vfs, config.permission);
+        tokio::task::spawn_blocking(move || fuser::mount2(fs, &opt.mount_point, &fuse_options))
+            .await??;
+    } else {
+        let db_path = paths::default_database_path().context("cannot locate database path")?;
+        if let Some(db_dir) = db_path.parent() {
+            std::fs::create_dir_all(db_dir).context("failed to create database directory")?;
+        }
+        let conn = rusqlite::Connection::open(db_path).context("failed to open database")?;
+        let vfs = vfs2::Vfs::new(onedrive, conn, config.permission)
+            .await
+            .context("failed to initialize vfs")?;
+        let fs = vfs2::FuseFs(vfs);
+        tokio::task::spawn_blocking(move || fuser::mount2(fs, &opt.mount_point, &fuse_options))
+            .await??;
+    }
     Ok(())
 }
 
@@ -290,4 +305,8 @@ struct OptMount {
     /// Setting from `--option` has highest priority, followed by `--config`, then the default setting.
     #[arg(short, long)]
     option: Vec<String>,
+
+    /// Use experimental VFSv2. WARNING: This is unstable and incomplete.
+    #[arg(long)]
+    experimental_vfs2: bool,
 }

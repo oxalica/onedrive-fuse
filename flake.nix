@@ -19,7 +19,7 @@ rec {
         inherit (manifest.package) name version;
 
         nativeBuildInputs = with pkgs; [ pkg-config ];
-        buildInputs = with pkgs; [ fuse3 openssl ];
+        buildInputs = with pkgs; [ fuse3 openssl sqlite ];
 
       in {
         packages = rec {
@@ -42,6 +42,7 @@ rec {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = nativeBuildInputs ++ [
             rust-overlay.packages.${system}.rust
+            pkgs.sqlite-interactive
           ];
           inherit buildInputs;
 
