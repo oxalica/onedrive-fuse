@@ -216,8 +216,9 @@ impl<B: Backend> Vfs<B> {
         Ok(())
     }
 
+    // TODO: Auto sync.
     fn ttl(&self) -> Duration {
-        Duration::ZERO
+        Duration::MAX
     }
 
     fn parse_attr(&self, row: &rusqlite::Row<'_>) -> FileAttr {

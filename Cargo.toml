@@ -16,7 +16,7 @@ clap = { version = "4.0.32", features = ["derive"] }
 config = { version = "0.13", default-features = false, features = ["toml"] }
 dirs = "5.0.0"
 env_logger = "0.10.0"
-fuser = "0.12.0"
+fuser = { version = "0.12.0", features = ["abi-7-31"] }
 http = "0.2.1"
 humantime = "2.0.1"
 indexmap = "1.6.2"
