@@ -17,7 +17,7 @@ pub use fuse_fs::FuseFs;
 
 use crate::config::PermissionConfig;
 
-pub use self::backend::Backend;
+pub use self::backend::{Backend, OnedriveBackend};
 
 const BLOCK_SIZE: u32 = 512;
 
@@ -44,10 +44,7 @@ impl From<Error> for i32 {
     fn from(err: Error) -> i32 {
         let err = match err {
             Error::NotFound => Errno::ENOENT,
-            Error::NonsequentialRead => {
-                log::warn!("non sequential read");
-                Errno::ESPIPE
-            }
+            Error::NonsequentialRead => Errno::ESPIPE,
 
             Error::Network(err) => {
                 log::error!("{err:#}");
@@ -72,21 +69,15 @@ pub struct Vfs<B> {
     conn: Connection,
     permission: PermissionConfig,
     backend: B,
-    fh_counter: u64,
-    file_streams: Arc<Mutex<HashMap<u64, FileStreamState>>>,
-}
-
-enum FileStreamState {
-    NotStarted { size: u64, id: String },
-    Ready(FileStream),
-    Reading,
-    Poisoned,
+    file_streams: Arc<Mutex<HashMap<u64, FileStream>>>,
 }
 
 struct FileStream {
-    reader: Pin<Box<dyn AsyncRead + Send + 'static>>,
+    ref_count: usize,
+    id: String,
     size: u64,
-    pos: u64,
+    pos: Option<u64>,
+    reader: Option<Pin<Box<dyn AsyncRead + Send + 'static>>>,
 }
 
 impl<B: Backend> Vfs<B> {
@@ -102,7 +93,6 @@ impl<B: Backend> Vfs<B> {
             conn,
             permission,
             backend,
-            fh_counter: 0,
             file_streams: Arc::new(Mutex::new(HashMap::new())),
         };
         this.sync().await?;
@@ -334,7 +324,9 @@ impl<B: Backend> Vfs<B> {
         Ok(())
     }
 
-    pub fn open_file(&mut self, ino: u64) -> Result<u64> {
+    pub fn open_file(&self, ino: u64) -> Result<()> {
+        use std::collections::hash_map::Entry;
+
         let (size, id): (u64, String) = self.conn.query_row(
             r"
             SELECT size, id
@@ -344,87 +336,102 @@ impl<B: Backend> Vfs<B> {
             params![ino],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let fh = self.fh_counter;
-        self.fh_counter += 1;
-        assert!(self
-            .file_streams
-            .lock()
-            .unwrap()
-            .insert(fh, FileStreamState::NotStarted { size, id })
-            .is_none());
-        Ok(fh)
+
+        let mut guard = self.file_streams.lock().unwrap();
+        match guard.entry(ino) {
+            Entry::Occupied(mut ent) => {
+                ent.get_mut().ref_count += 1;
+            }
+            Entry::Vacant(ent) => {
+                ent.insert(FileStream {
+                    ref_count: 1,
+                    id,
+                    size,
+                    pos: None,
+                    reader: None,
+                });
+            }
+        }
+
+        Ok(())
     }
 
-    pub fn close_file(&self, fh: u64) {
-        self.file_streams.lock().unwrap().remove(&fh);
+    pub fn close_file(&self, ino: u64) {
+        let mut guard = self.file_streams.lock().unwrap();
+        if let Some(stream) = guard.get_mut(&ino) {
+            stream.ref_count -= 1;
+            if stream.ref_count == 0 {
+                guard.remove(&ino);
+                log::debug!("drop stream of ino {ino:#x}");
+            }
+        }
     }
 
     pub fn read_file(
         &self,
-        fh: u64,
+        ino: u64,
         offset: u64,
-        len: usize,
+        mut len: usize,
     ) -> Result<impl Future<Output = Result<Vec<u8>>> + 'static> {
         use futures::future::Either;
 
         assert_ne!(len, 0, "kernel should not read zero");
 
-        let mut stream = {
+        let mut reader = {
             let mut guard = self.file_streams.lock().unwrap();
-            let place = guard.get_mut(&fh).expect("fh must be valid");
-            match place {
-                // EOF.
-                FileStreamState::Ready(stream) if stream.size <= offset => {
-                    // FIXME: Optimize this immediate future.
-                    return Ok(Either::Left(std::future::ready(Ok(Vec::new()))));
-                }
-                // Streaming read.
-                FileStreamState::Ready(stream) if stream.pos == offset => {
-                    match std::mem::replace(place, FileStreamState::Reading) {
-                        FileStreamState::Ready(stream) => stream,
-                        _ => unreachable!(),
+            let stream = guard.get_mut(&ino).ok_or(Error::NotFound)?;
+            if stream.size <= offset {
+                return Ok(Either::Left(futures::future::ready(Ok(Vec::new()))));
+            }
+            // Clamp the length.
+            len = usize::try_from(stream.size - offset)
+                .unwrap_or(usize::MAX)
+                .min(len);
+            match stream.pos {
+                // Read stream.
+                Some(pos) if pos == offset => match stream.reader.take() {
+                    Some(reader) => reader,
+                    None => {
+                        log::warn!("racing read at {offset}");
+                        return Err(Error::NonsequentialRead);
                     }
+                },
+                // New stream.
+                None => {
+                    stream.pos = Some(offset);
+                    // This is cheap before polling.
+                    self.backend.download(stream.id.clone(), offset)
                 }
-                // Stream start.
-                FileStreamState::NotStarted { .. } => {
-                    match std::mem::replace(place, FileStreamState::Reading) {
-                        FileStreamState::NotStarted { size, id } => FileStream {
-                            size,
-                            pos: 0,
-                            reader: self.backend.download(id),
-                        },
-                        _ => unreachable!(),
-                    }
+                Some(pos) => {
+                    log::warn!("non-sequential read at {offset}, but stream is at {pos}");
+                    return Err(Error::NonsequentialRead);
                 }
-                FileStreamState::Ready(_) | FileStreamState::Reading => {
-                    return Err(Error::NonsequentialRead)
-                }
-                FileStreamState::Poisoned => return Err(Error::Poisoned),
             }
         };
-
-        let len = usize::try_from(stream.size - offset)
-            .unwrap_or(usize::MAX)
-            .min(len);
 
         let file_streams = Arc::downgrade(&self.file_streams);
         Ok(Either::Right(async move {
             let mut buf = vec![0u8; len];
-            let (state, ret) = match stream.reader.as_mut().read_exact(&mut buf).await {
+            match reader.as_mut().read_exact(&mut buf).await {
                 Ok(()) => {
-                    stream.pos += buf.len() as u64;
-                    (FileStreamState::Ready(stream), Ok(buf))
+                    if let Some(file_streams) = file_streams.upgrade() {
+                        if let Some(stream) = file_streams.lock().unwrap().get_mut(&ino) {
+                            assert!(stream.reader.replace(reader).is_none());
+                            *stream.pos.as_mut().expect("stream is alive") += buf.len() as u64;
+                        }
+                    }
+                    Ok(buf)
                 }
-                Err(err) => (FileStreamState::Poisoned, Err(Error::Network(err))),
-            };
-            if let Some(file_streams) = file_streams.upgrade() {
-                *file_streams
-                    .lock()
-                    .unwrap()
-                    .get_mut(&fh)
-                    .expect("fh must be valid") = state;
+                Err(err) => {
+                    if let Some(file_streams) = file_streams.upgrade() {
+                        if let Some(stream) = file_streams.lock().unwrap().get_mut(&ino) {
+                            // Reset stream.
+                            assert!(stream.pos.take().is_some());
+                        }
+                    }
+                    Err(Error::Network(err))
+                }
             }
-            ret
         }))
     }
 }

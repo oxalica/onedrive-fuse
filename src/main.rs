@@ -165,20 +165,20 @@ async fn main_mount(opt: OptMount) -> Result<()> {
     let config = config::Config::merge_from_default(opt.config.as_deref(), &opt.option)?;
     let readonly = config.permission.readonly;
 
-    let client = reqwest::ClientBuilder::new()
+    let api_client = reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
         .gzip(true)
         .https_only(true)
         .connect_timeout(config.net.connect_timeout)
         .timeout(config.net.request_timeout)
         .build()?;
-    let unlimit_client = reqwest::ClientBuilder::new()
+    let download_client = reqwest::ClientBuilder::new()
         .https_only(true)
         .connect_timeout(config.net.connect_timeout)
         .build()?;
 
     let onedrive =
-        ManagedOnedrive::login(client, credential_path, config.relogin, readonly).await?;
+        ManagedOnedrive::login(api_client, credential_path, config.relogin, readonly).await?;
 
     let fuse_options = [
         MountOption::FSName("onedrive".into()),
@@ -204,7 +204,7 @@ async fn main_mount(opt: OptMount) -> Result<()> {
             readonly,
             config.vfs,
             onedrive.clone(),
-            unlimit_client,
+            download_client,
         )
         .await
         .context("Failed to initialize vfs")?;
@@ -217,7 +217,12 @@ async fn main_mount(opt: OptMount) -> Result<()> {
             std::fs::create_dir_all(db_dir).context("failed to create database directory")?;
         }
         let conn = rusqlite::Connection::open(db_path).context("failed to open database")?;
-        let vfs = vfs2::Vfs::new(onedrive, conn, config.permission)
+
+        let backend = vfs2::OnedriveBackend {
+            onedrive,
+            download_client,
+        };
+        let vfs = vfs2::Vfs::new(backend, conn, config.permission)
             .await
             .context("failed to initialize vfs")?;
         let fs = vfs2::FuseFs(vfs);

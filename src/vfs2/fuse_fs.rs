@@ -22,6 +22,8 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
 
         // Multi-issue `read` is not supported.
         let _ = config.set_max_background(1);
+        // FIXME: Read-ahead is non-sequential and sometimes breaks normal reads.
+        let _ = config.set_max_readahead(1);
 
         log::info!("Filesystem initialized");
         Ok(())
@@ -114,8 +116,8 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
             return reply.error(libc::EPERM);
         }
         match self.0.open_file(ino) {
-            // TODO: Utilize FOPEN_NONSEEKABLE?
-            Ok(fh) => reply.opened(fh, consts::FOPEN_DIRECT_IO),
+            // Keep cache between `open` as long as the generation of the inode unchanged.
+            Ok(()) => reply.opened(0, consts::FOPEN_NONSEEKABLE | consts::FOPEN_KEEP_CACHE),
             Err(err) => reply.error(err.into()),
         }
     }
@@ -123,22 +125,22 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
     fn release(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
+        ino: u64,
+        _fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        self.0.close_file(fh);
+        self.0.close_file(ino);
         reply.ok();
     }
 
     fn read(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
+        ino: u64,
+        _fh: u64,
         offset: i64,
         size: u32,
         _flags: i32,
@@ -147,7 +149,7 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
     ) {
         match self
             .0
-            .read_file(fh, offset as u64, size.try_into().unwrap())
+            .read_file(ino, offset as u64, size.try_into().unwrap())
         {
             Ok(fut) => {
                 tokio::spawn(async move {
