@@ -1,8 +1,12 @@
+use std::collections::HashMap;
 use std::ops::ControlFlow;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, ensure, Context};
 use fuser::{FileAttr, FileType};
+use futures::{AsyncRead, AsyncReadExt, Future};
 use nix::errno::Errno;
 use rusqlite::{named_params, params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -26,20 +30,37 @@ pub enum Error {
     // User errors.
     #[error("object not found")]
     NotFound,
+    #[error("non-sequential read on streams")]
+    NonsequentialRead,
+
+    // API errors.
+    #[error("network error during download")]
+    Network(#[source] std::io::Error),
+    #[error("read stream poisoned")]
+    Poisoned,
 }
 
 impl From<Error> for i32 {
     fn from(err: Error) -> i32 {
         let err = match err {
             Error::NotFound => Errno::ENOENT,
+            Error::NonsequentialRead => {
+                log::warn!("non sequential read");
+                Errno::ESPIPE
+            }
+
+            Error::Network(err) => {
+                log::error!("{err:#}");
+                Errno::EIO
+            }
+            Error::Poisoned => Errno::EIO,
         };
         err as _
     }
 }
 
-impl<T: Into<rusqlite::Error>> From<T> for Error {
-    fn from(err: T) -> Self {
-        let err = err.into();
+impl From<rusqlite::Error> for Error {
+    fn from(err: rusqlite::Error) -> Self {
         if let rusqlite::Error::QueryReturnedNoRows = err {
             return Self::NotFound;
         }
@@ -51,6 +72,21 @@ pub struct Vfs<B> {
     conn: Connection,
     permission: PermissionConfig,
     backend: B,
+    fh_counter: u64,
+    file_streams: Arc<Mutex<HashMap<u64, FileStreamState>>>,
+}
+
+enum FileStreamState {
+    NotStarted { size: u64, id: String },
+    Ready(FileStream),
+    Reading,
+    Poisoned,
+}
+
+struct FileStream {
+    reader: Pin<Box<dyn AsyncRead + Send + 'static>>,
+    size: u64,
+    pos: u64,
 }
 
 impl<B: Backend> Vfs<B> {
@@ -66,6 +102,8 @@ impl<B: Backend> Vfs<B> {
             conn,
             permission,
             backend,
+            fh_counter: 0,
+            file_streams: Arc::new(Mutex::new(HashMap::new())),
         };
         this.sync().await?;
         Ok(this)
@@ -87,9 +125,7 @@ impl<B: Backend> Vfs<B> {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let current_timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs();
+        let current_timestamp = current_timestamp();
         txn.execute(r"DELETE FROM sync", params![])?;
         txn.execute(
             r"INSERT INTO sync (time, delta_url) VALUES (?, ?)",
@@ -277,17 +313,125 @@ impl<B: Backend> Vfs<B> {
         offset: u64,
         mut f: impl FnMut(&str, FileAttr, Duration) -> ControlFlow<()>,
     ) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare(r"SELECT * FROM item WHERE parent_ino = ? AND ino > ? ORDER BY ino ASC")?;
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT * FROM item
+            WHERE parent_ino = ? AND ino > ?
+            ORDER BY ino ASC
+            ",
+        )?;
         let ttl = self.ttl();
         let mut rows = stmt.query(params![ino, offset])?;
         while let Some(row) = rows.next()? {
-            let name = row.get_ref_unwrap("name").as_str()?;
+            let name = row
+                .get_ref_unwrap("name")
+                .as_str()
+                .map_err(rusqlite::Error::from)?;
             if f(name, self.parse_attr(row), ttl).is_break() {
                 break;
             }
         }
         Ok(())
     }
+
+    pub fn open_file(&mut self, ino: u64) -> Result<u64> {
+        let (size, id): (u64, String) = self.conn.query_row(
+            r"
+            SELECT size, id
+            FROM item
+            WHERE ino = ? AND NOT is_directory
+            ",
+            params![ino],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let fh = self.fh_counter;
+        self.fh_counter += 1;
+        assert!(self
+            .file_streams
+            .lock()
+            .unwrap()
+            .insert(fh, FileStreamState::NotStarted { size, id })
+            .is_none());
+        Ok(fh)
+    }
+
+    pub fn close_file(&self, fh: u64) {
+        self.file_streams.lock().unwrap().remove(&fh);
+    }
+
+    pub fn read_file(
+        &self,
+        fh: u64,
+        offset: u64,
+        len: usize,
+    ) -> Result<impl Future<Output = Result<Vec<u8>>> + 'static> {
+        use futures::future::Either;
+
+        assert_ne!(len, 0, "kernel should not read zero");
+
+        let mut stream = {
+            let mut guard = self.file_streams.lock().unwrap();
+            let place = guard.get_mut(&fh).expect("fh must be valid");
+            match place {
+                // EOF.
+                FileStreamState::Ready(stream) if stream.size <= offset => {
+                    // FIXME: Optimize this immediate future.
+                    return Ok(Either::Left(std::future::ready(Ok(Vec::new()))));
+                }
+                // Streaming read.
+                FileStreamState::Ready(stream) if stream.pos == offset => {
+                    match std::mem::replace(place, FileStreamState::Reading) {
+                        FileStreamState::Ready(stream) => stream,
+                        _ => unreachable!(),
+                    }
+                }
+                // Stream start.
+                FileStreamState::NotStarted { .. } => {
+                    match std::mem::replace(place, FileStreamState::Reading) {
+                        FileStreamState::NotStarted { size, id } => FileStream {
+                            size,
+                            pos: 0,
+                            reader: self.backend.download(id),
+                        },
+                        _ => unreachable!(),
+                    }
+                }
+                FileStreamState::Ready(_) | FileStreamState::Reading => {
+                    return Err(Error::NonsequentialRead)
+                }
+                FileStreamState::Poisoned => return Err(Error::Poisoned),
+            }
+        };
+
+        let len = usize::try_from(stream.size - offset)
+            .unwrap_or(usize::MAX)
+            .min(len);
+
+        let file_streams = Arc::downgrade(&self.file_streams);
+        Ok(Either::Right(async move {
+            let mut buf = vec![0u8; len];
+            let (state, ret) = match stream.reader.as_mut().read_exact(&mut buf).await {
+                Ok(()) => {
+                    stream.pos += buf.len() as u64;
+                    (FileStreamState::Ready(stream), Ok(buf))
+                }
+                Err(err) => (FileStreamState::Poisoned, Err(Error::Network(err))),
+            };
+            if let Some(file_streams) = file_streams.upgrade() {
+                *file_streams
+                    .lock()
+                    .unwrap()
+                    .get_mut(&fh)
+                    .expect("fh must be valid") = state;
+            }
+            ret
+        }))
+    }
+}
+
+fn current_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("post epoch")
+        .as_secs()
 }

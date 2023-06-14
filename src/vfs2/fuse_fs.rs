@@ -20,6 +20,9 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         // Stateless readdir.
         let _ = config.add_capabilities(consts::FUSE_PARALLEL_DIROPS);
 
+        // Multi-issue `read` is not supported.
+        let _ = config.set_max_background(1);
+
         log::info!("Filesystem initialized");
         Ok(())
     }
@@ -100,6 +103,60 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
             }
         }) {
             Ok(()) => reply.ok(),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
+        let flags = (flags as u32) & (!libc::S_IFMT);
+        // TODO: Write support.
+        if flags != 0 {
+            return reply.error(libc::EPERM);
+        }
+        match self.0.open_file(ino) {
+            // TODO: Utilize FOPEN_NONSEEKABLE?
+            Ok(fh) => reply.opened(fh, consts::FOPEN_DIRECT_IO),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        self.0.close_file(fh);
+        reply.ok();
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyData,
+    ) {
+        match self
+            .0
+            .read_file(fh, offset as u64, size.try_into().unwrap())
+        {
+            Ok(fut) => {
+                tokio::spawn(async move {
+                    match fut.await {
+                        Ok(buf) => reply.data(&buf),
+                        Err(err) => reply.error(err.into()),
+                    }
+                });
+            }
             Err(err) => reply.error(err.into()),
         }
     }

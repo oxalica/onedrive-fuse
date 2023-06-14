@@ -1,8 +1,12 @@
+use std::pin::Pin;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::{AsyncRead, TryFutureExt, TryStreamExt};
 use onedrive_api::option::CollectionOption;
 pub use onedrive_api::resource::DriveItem;
 use onedrive_api::resource::DriveItemField;
+use onedrive_api::ItemId;
 
 use crate::login::ManagedOnedrive;
 
@@ -11,6 +15,7 @@ const PAGE_SIZE: usize = 1024;
 #[async_trait]
 pub trait Backend {
     async fn sync(&self, delta_url: Option<&str>) -> Result<(Vec<DriveItem>, String)>;
+    fn download(&self, id: String) -> Pin<Box<dyn AsyncRead + Send + 'static>>;
 }
 
 #[async_trait]
@@ -53,5 +58,20 @@ impl Backend for ManagedOnedrive {
 
         let delta_url = fetcher.delta_url().context("missing delta URL")?.to_owned();
         Ok((items, delta_url))
+    }
+
+    fn download(&self, id: String) -> Pin<Box<dyn AsyncRead + Send + 'static>> {
+        let this = self.clone();
+        let stream = async move {
+            let drive = this.get().await;
+            let url = drive.get_item_download_url(&ItemId(id)).await?;
+            // TODO: Rate control and retry.
+            let resp = reqwest::get(url).await?.error_for_status()?;
+            Ok(resp.bytes_stream().map_err(Into::into))
+        }
+        .try_flatten_stream()
+        .map_err(|err: anyhow::Error| std::io::Error::new(std::io::ErrorKind::Other, err))
+        .into_async_read();
+        Box::pin(stream)
     }
 }
