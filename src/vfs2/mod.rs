@@ -69,16 +69,18 @@ pub struct Vfs<B> {
     conn: Connection,
     permission: PermissionConfig,
     backend: B,
-    file_streams: Arc<Mutex<HashMap<u64, FileStream>>>,
+    file_streams: HashMap<u64, FileStreams>,
 }
 
-struct FileStream {
+struct FileStreams {
     ref_count: usize,
     id: String,
     size: u64,
-    pos: Option<u64>,
-    reader: Option<Pin<Box<dyn AsyncRead + Send + 'static>>>,
+    // stream_position -> stream
+    readers: Arc<Mutex<HashMap<u64, Reader>>>,
 }
+
+type Reader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 
 impl<B: Backend> Vfs<B> {
     const INIT_SQL: &'static str = include_str!("./init.sql");
@@ -93,7 +95,7 @@ impl<B: Backend> Vfs<B> {
             conn,
             permission,
             backend,
-            file_streams: Arc::new(Mutex::new(HashMap::new())),
+            file_streams: HashMap::new(),
         };
         this.sync().await?;
         Ok(this)
@@ -324,7 +326,7 @@ impl<B: Backend> Vfs<B> {
         Ok(())
     }
 
-    pub fn open_file(&self, ino: u64) -> Result<()> {
+    pub fn open_file(&mut self, ino: u64) -> Result<()> {
         use std::collections::hash_map::Entry;
 
         let (size, id): (u64, String) = self.conn.query_row(
@@ -337,18 +339,16 @@ impl<B: Backend> Vfs<B> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
-        let mut guard = self.file_streams.lock().unwrap();
-        match guard.entry(ino) {
+        match self.file_streams.entry(ino) {
             Entry::Occupied(mut ent) => {
                 ent.get_mut().ref_count += 1;
             }
             Entry::Vacant(ent) => {
-                ent.insert(FileStream {
+                ent.insert(FileStreams {
                     ref_count: 1,
                     id,
                     size,
-                    pos: None,
-                    reader: None,
+                    readers: Arc::new(Mutex::new(HashMap::new())),
                 });
             }
         }
@@ -356,19 +356,18 @@ impl<B: Backend> Vfs<B> {
         Ok(())
     }
 
-    pub fn close_file(&self, ino: u64) {
-        let mut guard = self.file_streams.lock().unwrap();
-        if let Some(stream) = guard.get_mut(&ino) {
+    pub fn close_file(&mut self, ino: u64) {
+        if let Some(stream) = self.file_streams.get_mut(&ino) {
             stream.ref_count -= 1;
             if stream.ref_count == 0 {
-                guard.remove(&ino);
-                log::debug!("drop stream of ino {ino:#x}");
+                self.file_streams.remove(&ino);
+                log::debug!("drop streams of ino {ino:#x}");
             }
         }
     }
 
     pub fn read_file(
-        &self,
+        &mut self,
         ino: u64,
         offset: u64,
         mut len: usize,
@@ -377,61 +376,31 @@ impl<B: Backend> Vfs<B> {
 
         assert_ne!(len, 0, "kernel should not read zero");
 
-        let mut reader = {
-            let mut guard = self.file_streams.lock().unwrap();
-            let stream = guard.get_mut(&ino).ok_or(Error::NotFound)?;
-            if stream.size <= offset {
-                return Ok(Either::Left(futures::future::ready(Ok(Vec::new()))));
-            }
-            // Clamp the length.
-            len = usize::try_from(stream.size - offset)
-                .unwrap_or(usize::MAX)
-                .min(len);
-            match stream.pos {
-                // Read stream.
-                Some(pos) if pos == offset => match stream.reader.take() {
-                    Some(reader) => reader,
-                    None => {
-                        log::warn!("racing read at {offset}");
-                        return Err(Error::NonsequentialRead);
-                    }
-                },
-                // New stream.
-                None => {
-                    stream.pos = Some(offset);
-                    // This is cheap before polling.
-                    self.backend.download(stream.id.clone(), offset)
-                }
-                Some(pos) => {
-                    log::warn!("non-sequential read at {offset}, but stream is at {pos}");
-                    return Err(Error::NonsequentialRead);
-                }
-            }
-        };
+        let streams = self.file_streams.get_mut(&ino).ok_or(Error::NotFound)?;
+        if streams.size <= offset {
+            return Ok(Either::Left(futures::future::ready(Ok(Vec::new()))));
+        }
+        // Clamp the length.
+        len = usize::try_from(streams.size - offset)
+            .unwrap_or(usize::MAX)
+            .min(len);
+        let reader = streams.readers.lock().unwrap().remove(&offset);
+        let mut reader =
+            reader.unwrap_or_else(|| self.backend.download(streams.id.clone(), offset));
 
-        let file_streams = Arc::downgrade(&self.file_streams);
+        let readers = Arc::downgrade(&streams.readers);
         Ok(Either::Right(async move {
             let mut buf = vec![0u8; len];
-            match reader.as_mut().read_exact(&mut buf).await {
-                Ok(()) => {
-                    if let Some(file_streams) = file_streams.upgrade() {
-                        if let Some(stream) = file_streams.lock().unwrap().get_mut(&ino) {
-                            assert!(stream.reader.replace(reader).is_none());
-                            *stream.pos.as_mut().expect("stream is alive") += buf.len() as u64;
-                        }
-                    }
-                    Ok(buf)
-                }
-                Err(err) => {
-                    if let Some(file_streams) = file_streams.upgrade() {
-                        if let Some(stream) = file_streams.lock().unwrap().get_mut(&ino) {
-                            // Reset stream.
-                            assert!(stream.pos.take().is_some());
-                        }
-                    }
-                    Err(Error::Network(err))
-                }
+            reader
+                .as_mut()
+                .read_exact(&mut buf)
+                .await
+                .map_err(Error::Network)?;
+            if let Some(readers) = readers.upgrade() {
+                let new_pos = offset + len as u64;
+                readers.lock().unwrap().insert(new_pos, reader);
             }
+            Ok(buf)
         }))
     }
 }

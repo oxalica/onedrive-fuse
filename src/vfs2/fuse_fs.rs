@@ -22,8 +22,6 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
 
         // Multi-issue `read` is not supported.
         let _ = config.set_max_background(1);
-        // FIXME: Read-ahead is non-sequential and sometimes breaks normal reads.
-        let _ = config.set_max_readahead(1);
 
         log::info!("Filesystem initialized");
         Ok(())
