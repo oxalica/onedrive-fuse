@@ -1,4 +1,8 @@
 PRAGMA foreign_keys = TRUE;
+PRAGMA temp_store = MEMORY;
+
+PRAGMA synchronous = NORMAL;
+PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS item (
     ino             INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
