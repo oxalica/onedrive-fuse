@@ -6,7 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, ensure, Context};
 use fuser::{FileAttr, FileType};
-use futures::{AsyncRead, AsyncReadExt, Future};
+use futures::future::Either;
+use futures::{AsyncRead, AsyncReadExt, Future, StreamExt};
 use nix::errno::Errno;
 use rusqlite::{named_params, params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -17,7 +18,7 @@ pub use fuse_fs::FuseFs;
 
 use crate::config::PermissionConfig;
 
-pub use self::backend::{Backend, OnedriveBackend};
+pub use self::backend::{Backend, FullSyncRequired, OnedriveBackend};
 
 const BLOCK_SIZE: u32 = 512;
 
@@ -97,38 +98,42 @@ impl<B: Backend> Vfs<B> {
             backend,
             file_streams: HashMap::new(),
         };
-        this.sync().await?;
+        this.apply_remote_changes().await?;
         Ok(this)
     }
 
-    async fn sync(&mut self) -> anyhow::Result<()> {
-        let delta_url = self
+    async fn apply_remote_changes(&mut self) -> anyhow::Result<()> {
+        let prev_delta_url = self
             .conn
             .query_row(r"SELECT * FROM sync LIMIT 1", params![], |row| {
                 row.get::<_, String>("delta_url")
             })
             .optional()?;
-        let is_full_sync = delta_url.is_none();
 
-        // TODO: Expiration handling.
-        let (items, delta_url) = self.backend.sync(delta_url.as_deref()).await?;
+        let mut is_full_sync = prev_delta_url.is_none();
+
+        let mut stream = match self.backend.fetch_changes(prev_delta_url).await {
+            Ok(stream) => stream,
+            Err(err) if err.is::<FullSyncRequired>() => {
+                log::warn!("{err}");
+                is_full_sync = true;
+                self.backend.fetch_changes(None).await?
+            }
+            Err(err) => return Err(err),
+        };
+
+        let fetch_timestamp = current_timestamp();
 
         let txn = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let current_timestamp = current_timestamp();
-        txn.execute(r"DELETE FROM sync", params![])?;
-        txn.execute(
-            r"INSERT INTO sync (time, delta_url) VALUES (?, ?)",
-            params![current_timestamp, delta_url],
-        )?;
-
         if is_full_sync {
             txn.execute(r"DELETE FROM item", params![])?;
         }
 
-        {
+        let mut change_cnt = 0u64;
+        let new_delta_url = {
             let mut insert_root_stmt = txn.prepare(
                 r"
                 INSERT OR REPLACE INTO item (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
@@ -158,7 +163,17 @@ impl<B: Backend> Vfs<B> {
                 ",
             )?;
 
-            for item in items {
+            loop {
+                let item = match stream.next().await.context("missing delta_url")?? {
+                    Either::Left(item) => item,
+                    Either::Right(delta_url) => break delta_url,
+                };
+
+                change_cnt += 1;
+                if change_cnt % 1024 == 0 {
+                    log::info!("Got {change_cnt} remote changes...");
+                }
+
                 let id = item.id.as_ref().expect("missing id").as_str();
 
                 if item.deleted.is_some() {
@@ -237,7 +252,18 @@ impl<B: Backend> Vfs<B> {
                     );
                 }
             }
+        };
+        if change_cnt != 0 {
+            log::info!("Applied {change_cnt} remote changes in total");
+        } else {
+            log::info!("No changes");
         }
+
+        txn.execute(r"DELETE FROM sync", params![])?;
+        txn.execute(
+            r"INSERT INTO sync (time, delta_url) VALUES (?, ?)",
+            params![fetch_timestamp, new_delta_url],
+        )?;
 
         txn.commit()?;
 
@@ -372,8 +398,6 @@ impl<B: Backend> Vfs<B> {
         offset: u64,
         mut len: usize,
     ) -> Result<impl Future<Output = Result<Vec<u8>>> + 'static> {
-        use futures::future::Either;
-
         assert_ne!(len, 0, "kernel should not read zero");
 
         let streams = self.file_streams.get_mut(&ino).ok_or(Error::NotFound)?;

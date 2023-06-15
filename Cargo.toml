@@ -10,7 +10,6 @@ license = "GPL-3.0-only"
 
 [dependencies]
 anyhow = "1.0.28"
-async-trait = "0.1.68"
 bytes = "1.0.1"
 clap = { version = "4.0.32", features = ["derive"] }
 config = { version = "0.13", default-features = false, features = ["toml"] }

@@ -903,7 +903,6 @@ name = "onedrive-fuse"
 version = "0.2.6"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
  "clap",
  "config",
