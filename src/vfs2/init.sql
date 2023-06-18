@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS item (
     UNIQUE (parent_ino, name)
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS item_children_by_ino ON item (parent_ino ASC, ino ASC);
+CREATE UNIQUE INDEX IF NOT EXISTS item_children_by_ino ON item (parent_ino ASC, ino ASC);
+CREATE UNIQUE INDEX IF NOT EXISTS item_children_by_name ON item (parent_ino ASC, name ASC);
 
 CREATE TABLE IF NOT EXISTS sync (
     time            INTEGER NOT NULL,

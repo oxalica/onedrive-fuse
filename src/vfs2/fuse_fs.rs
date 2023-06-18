@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::ops::ControlFlow;
+use std::time::Duration;
 
 use fuser::{consts, Request};
 
@@ -15,6 +16,10 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         _req: &Request<'_>,
         config: &mut fuser::KernelConfig,
     ) -> Result<(), libc::c_int> {
+        config
+            .set_time_granularity(Duration::from_secs(1))
+            .expect("failed to set time granularity");
+
         // Prefer readdirplus if possible.
         let _ = config.add_capabilities(consts::FUSE_DO_READDIRPLUS);
         // Stateless readdir.
@@ -187,5 +192,21 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
                 Err(err) => reply.error(err.into()),
             }
         });
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent_ino: u64,
+        child_name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        let Some(child_name) = child_name.to_str() else { return reply.error(libc::EINVAL) };
+        match self.0.create_directory(parent_ino, child_name) {
+            Ok((ttl, attr)) => reply.entry(&ttl, &attr, GENERATION),
+            Err(err) => reply.error(err.into()),
+        }
     }
 }

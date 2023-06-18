@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use fuser::{FileAttr, FileType};
 use futures::future::Either;
 use futures::{AsyncRead, AsyncReadExt, Future, StreamExt};
 use nix::errno::Errno;
-use rusqlite::{named_params, params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{
+    named_params, params, Connection, DropBehavior, OptionalExtension, TransactionBehavior,
+};
 
 mod backend;
 mod fuse_fs;
@@ -21,8 +23,8 @@ use tokio::task;
 
 use crate::config::PermissionConfig;
 
-use self::backend::ItemChange;
 pub use self::backend::{Backend, FullSyncRequired, OnedriveBackend};
+use self::backend::{LocalItemChange, RemoteItemChange};
 
 // TODO: Configurable.
 const SYNC_PERIOD: Duration = Duration::from_secs(60);
@@ -40,6 +42,8 @@ pub enum Error {
     NotFound,
     #[error("non-sequential read on streams")]
     NonsequentialRead,
+    #[error("object already exists")]
+    Exists,
 
     // API errors.
     #[error("network error during download")]
@@ -53,6 +57,7 @@ impl From<Error> for i32 {
         let err = match err {
             Error::NotFound => Errno::ENOENT,
             Error::NonsequentialRead => Errno::ESPIPE,
+            Error::Exists => Errno::EEXIST,
 
             Error::Network(err) => {
                 log::error!("{err:#}");
@@ -102,6 +107,105 @@ impl<B> Drop for Vfs<B> {
     }
 }
 
+struct RemoteChangeCommitter<'conn> {
+    insert_root_stmt: rusqlite::Statement<'conn>,
+    insert_child_stmt: rusqlite::Statement<'conn>,
+    delete_stmt: rusqlite::Statement<'conn>,
+}
+
+impl<'conn> RemoteChangeCommitter<'conn> {
+    fn new(conn: &'conn rusqlite::Connection) -> rusqlite::Result<Self> {
+        let insert_root_stmt = conn.prepare(
+            r"
+            INSERT OR REPLACE INTO item (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
+            VALUES (1, :id, TRUE, NULL, NULL, 0, :created_time, :modified_time)
+            ",
+        )?;
+        let insert_child_stmt = conn.prepare(
+            r"
+            INSERT INTO item
+            (id, is_directory, parent_ino, name, size, created_time, modified_time)
+            SELECT :id, :is_directory, ino, :name, :size, :created_time, :modified_time
+            FROM item
+            WHERE id = :parent_id AND is_directory
+            ON CONFLICT (id) DO UPDATE -- Remote updates.
+            SET
+                name = :name,
+                size = :size,
+                is_directory = :is_directory,
+                parent_ino = excluded.parent_ino,
+                created_time = :created_time,
+                modified_time = :modified_time
+            ON CONFLICT (parent_ino, name) DO UPDATE -- Pushed new items.
+            SET
+                id = :id,
+                size = :size,
+                is_directory = :is_directory,
+                created_time = :created_time,
+                modified_time = :modified_time
+            ",
+        )?;
+        let delete_stmt = conn.prepare(
+            r"
+            DELETE FROM item
+            WHERE id = :id
+            ",
+        )?;
+        Ok(Self {
+            insert_root_stmt,
+            insert_child_stmt,
+            delete_stmt,
+        })
+    }
+
+    fn execute(&mut self, change: &RemoteItemChange) -> rusqlite::Result<()> {
+        let to_timestamp = |time: SystemTime| {
+            time.duration_since(SystemTime::UNIX_EPOCH)
+                .expect("post UNIX epoch")
+                .as_secs()
+        };
+
+        match change {
+            RemoteItemChange::RootUpdate {
+                id,
+                created_time,
+                modified_time,
+            } => {
+                self.insert_root_stmt.execute(named_params! {
+                    ":id": id,
+                    ":created_time": to_timestamp(*created_time),
+                    ":modified_time": to_timestamp(*modified_time),
+                })?;
+            }
+            RemoteItemChange::Update {
+                id,
+                parent_id,
+                name,
+                is_directory,
+                size,
+                created_time,
+                modified_time,
+            } => {
+                self.insert_child_stmt.execute(named_params! {
+                    ":id": id,
+                    ":parent_id": parent_id,
+                    ":name": name,
+                    ":is_directory": is_directory,
+                    ":size": size,
+                    ":created_time": to_timestamp(*created_time),
+                    ":modified_time": to_timestamp(*modified_time),
+                })?;
+            }
+            RemoteItemChange::Delete { id } => {
+                self.delete_stmt.execute(named_params! {
+                    ":id": id,
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<B: Backend> Vfs<B> {
     const INIT_SQL: &'static str = include_str!("./init.sql");
 
@@ -118,7 +222,7 @@ impl<B: Backend> Vfs<B> {
         let sync_conn = Connection::open(path).context("failed to reconnect to the database")?;
 
         // Apply initial changes first.
-        let init_timestamp = Self::apply_remote_changes(&mut conn, &backend).await?;
+        let init_timestamp = Self::pull_remote_changes(&mut conn, &backend).await?;
 
         let (sync_trigger, sync_trigger_rx) = mpsc::channel(1);
         let last_sync_timestamp = Arc::new(AtomicU64::new(init_timestamp));
@@ -154,14 +258,28 @@ impl<B: Backend> Vfs<B> {
                 Err(_elapsed) => None,
                 Ok(None) => return,
             };
-            let ret = Self::apply_remote_changes(&mut conn, &backend).await;
+
+            // XXX: Balance between push and pull to prevent starvation?
+            loop {
+                match Self::push_local_changes(&mut conn, &backend).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(err) => {
+                        // TODO: Make the filesystem readonly?
+                        log::error!("Failed to push local changes: {err:#}");
+                        break;
+                    }
+                }
+            }
+
+            let ret = Self::pull_remote_changes(&mut conn, &backend).await;
             match &ret {
                 Ok(timestamp) => {
                     last_sync_timestamp.store(*timestamp, Ordering::Relaxed);
                 }
                 Err(err) => {
                     // TODO: Make the filesystem readonly?
-                    log::error!("Failed to synchronize with remote: {err:#}");
+                    log::error!("Failed to pull remote changes: {err:#}");
                 }
             }
             if let Some(callback) = callback {
@@ -170,7 +288,76 @@ impl<B: Backend> Vfs<B> {
         }
     }
 
-    async fn apply_remote_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<u64> {
+    async fn push_local_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<usize> {
+        let mut txn = conn.transaction()?;
+
+        // If some requests failed, still commit the success ones.
+        txn.set_drop_behavior(DropBehavior::Commit);
+
+        let max_len = backend.max_push_len();
+        let changes = txn
+            .prepare(
+                r"
+                WITH RECURSIVE
+                    dirty_item(ino, parent_id, child_path, created_time, modified_time) AS (
+                        SELECT
+                            item.ino,
+                            parent.id,
+                            '/' || item.name,
+                            item.created_time,
+                            item.modified_time
+                        FROM item
+                        JOIN item AS parent ON parent.ino = item.parent_ino AND parent.id IS NOT NULL
+                        WHERE item.id IS NULL
+
+                        UNION ALL
+                        SELECT
+                            item.ino,
+                            parent_id,
+                            child_path || '/' || item.name,
+                            item.created_time,
+                            item.modified_time
+                        FROM dirty_item
+                        JOIN item ON item.parent_ino = dirty_item.ino
+                    )
+                SELECT * FROM dirty_item
+                LIMIT ?
+                ",
+            )?
+            .query_and_then(params![max_len], |row| {
+                anyhow::Ok(LocalItemChange::CreateDirectory {
+                    parent_id: row.get("parent_id")?,
+                    child_path: row.get("child_path")?,
+                    created_time: SystemTime::UNIX_EPOCH
+                        + Duration::from_secs(row.get("created_time")?),
+                    modified_time: SystemTime::UNIX_EPOCH
+                        + Duration::from_secs(row.get("modified_time")?),
+                })
+            })?
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        // Fast path.
+        if changes.is_empty() {
+            return Ok(0);
+        }
+
+        let responses = backend.push_changes(changes).await?;
+        let responses_len = responses.len();
+        ensure!(responses_len != 0, "no response");
+        {
+            let mut committer = RemoteChangeCommitter::new(&txn)?;
+            for ret in responses {
+                // TODO: Make this fail-safe.
+                committer.execute(&ret?)?;
+            }
+        }
+        log::info!("Pushed {responses_len} local changes");
+
+        txn.commit()?;
+        Ok(responses_len)
+    }
+
+    async fn pull_remote_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<u64> {
         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let prev_delta_url = txn
@@ -181,12 +368,12 @@ impl<B: Backend> Vfs<B> {
 
         let mut is_full_sync = prev_delta_url.is_none();
 
-        let mut stream = match backend.fetch_changes(prev_delta_url).await {
+        let mut stream = match backend.pull_changes(prev_delta_url).await {
             Ok(stream) => stream,
             Err(err) if err.is::<FullSyncRequired>() => {
                 log::warn!("{err}");
                 is_full_sync = true;
-                backend.fetch_changes(None).await?
+                backend.pull_changes(None).await?
             }
             Err(err) => return Err(err),
         };
@@ -199,35 +386,7 @@ impl<B: Backend> Vfs<B> {
 
         let mut change_cnt = 0u64;
         let new_delta_url = {
-            let mut insert_root_stmt = txn.prepare(
-                r"
-                INSERT OR REPLACE INTO item (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
-                VALUES (1, :id, TRUE, NULL, NULL, 0, :created_time, :modified_time)
-                ",
-            )?;
-            let mut insert_child_stmt = txn.prepare(
-                r"
-                INSERT INTO item
-                (id, is_directory, parent_ino, name, size, created_time, modified_time)
-                SELECT :id, :is_directory, ino, :name, :size, :created_time, :modified_time
-                FROM item
-                WHERE id = :parent_id AND is_directory
-                ON CONFLICT DO UPDATE
-                SET
-                    name = :name,
-                    size = :size,
-                    parent_ino = excluded.parent_ino,
-                    created_time = :created_time,
-                    modified_time = :modified_time
-                ",
-            )?;
-            let mut delete_stmt = txn.prepare(
-                r"
-                DELETE FROM item
-                WHERE id = :id
-                ",
-            )?;
-
+            let mut committer = RemoteChangeCommitter::new(&txn)?;
             loop {
                 let change = match stream.next().await.context("missing delta_url")?? {
                     Either::Left(item) => item,
@@ -239,49 +398,7 @@ impl<B: Backend> Vfs<B> {
                     log::info!("Got {change_cnt} remote changes...");
                 }
 
-                let to_timestamp = |time: SystemTime| {
-                    time.duration_since(SystemTime::UNIX_EPOCH)
-                        .expect("post UNIX epoch")
-                        .as_secs()
-                };
-
-                match change {
-                    ItemChange::RootUpdate {
-                        id,
-                        created_time,
-                        modified_time,
-                    } => {
-                        insert_root_stmt.execute(named_params! {
-                            ":id": id,
-                            ":created_time": to_timestamp(created_time),
-                            ":modified_time": to_timestamp(modified_time),
-                        })?;
-                    }
-                    ItemChange::Update {
-                        id,
-                        parent_id,
-                        name,
-                        is_directory,
-                        size,
-                        created_time,
-                        modified_time,
-                    } => {
-                        insert_child_stmt.execute(named_params! {
-                            ":id": id,
-                            ":parent_id": parent_id,
-                            ":name": name,
-                            ":is_directory": is_directory,
-                            ":size": size,
-                            ":created_time": to_timestamp(created_time),
-                            ":modified_time": to_timestamp(modified_time),
-                        })?;
-                    }
-                    ItemChange::Delete { id } => {
-                        delete_stmt.execute(named_params! {
-                            ":id": id,
-                        })?;
-                    }
-                }
+                committer.execute(&change)?;
             }
         };
         if change_cnt != 0 {
@@ -479,6 +596,53 @@ impl<B: Backend> Vfs<B> {
                 .context("sync failed")
                 .map_err(Error::Network)
         }
+    }
+
+    pub fn create_directory(
+        &mut self,
+        parent_ino: u64,
+        child_name: &str,
+    ) -> Result<(Duration, FileAttr)> {
+        let timestamp = current_timestamp();
+
+        let changed = self.conn.execute(
+            r"
+            INSERT OR IGNORE
+            INTO item (id, is_directory, parent_ino, name, size, created_time, modified_time)
+            VALUES (NULL, TRUE, :parent_ino, :name, 0, :timestamp, :timestamp)
+            ",
+            named_params! {
+                ":parent_ino": parent_ino,
+                ":name": child_name,
+                ":timestamp": timestamp,
+            },
+        )?;
+        if changed == 0 {
+            return Err(Error::Exists);
+        }
+        let ino = self.conn.last_insert_rowid() as u64;
+
+        // XXX: Should we cache items not uploaded yet?
+        let ttl = Duration::ZERO;
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp);
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: time,
+            mtime: time,
+            ctime: time,
+            crtime: time,
+            kind: FileType::Directory,
+            perm: self.permission.dir_permission() as _,
+            nlink: 1,
+            uid: self.permission.uid,
+            gid: self.permission.gid,
+            rdev: 0,
+            blksize: BLOCK_SIZE,
+            flags: 0,
+        };
+        Ok((ttl, attr))
     }
 }
 
