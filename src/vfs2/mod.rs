@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -80,6 +81,7 @@ pub struct Vfs<B> {
 
     sync_thread: task::JoinHandle<()>,
     sync_trigger: mpsc::Sender<SyncCallback>,
+    last_sync_timestamp: Arc<AtomicU64>,
 }
 
 type SyncCallback = oneshot::Sender<anyhow::Result<()>>;
@@ -116,15 +118,17 @@ impl<B: Backend> Vfs<B> {
         let sync_conn = Connection::open(path).context("failed to reconnect to the database")?;
 
         // Apply initial changes first.
-        Self::apply_remote_changes(&mut conn, &backend).await?;
+        let init_timestamp = Self::apply_remote_changes(&mut conn, &backend).await?;
 
         let (sync_trigger, sync_trigger_rx) = mpsc::channel(1);
+        let last_sync_timestamp = Arc::new(AtomicU64::new(init_timestamp));
         // Workaround: `Transaction` is `!Send` and kept across `await` point, causing the future
         // to be `!Send`.
         let sync_thread = task::spawn_local(Self::sync_thread(
             sync_conn,
             backend.clone(),
             sync_trigger_rx,
+            Arc::clone(&last_sync_timestamp),
         ));
 
         Ok(Self {
@@ -134,6 +138,7 @@ impl<B: Backend> Vfs<B> {
             file_streams: HashMap::new(),
             sync_thread,
             sync_trigger,
+            last_sync_timestamp,
         })
     }
 
@@ -141,6 +146,7 @@ impl<B: Backend> Vfs<B> {
         mut conn: Connection,
         backend: B,
         mut sync_trigger: mpsc::Receiver<SyncCallback>,
+        last_sync_timestamp: Arc<AtomicU64>,
     ) {
         loop {
             let callback = match tokio::time::timeout(SYNC_PERIOD, sync_trigger.recv()).await {
@@ -149,17 +155,22 @@ impl<B: Backend> Vfs<B> {
                 Ok(None) => return,
             };
             let ret = Self::apply_remote_changes(&mut conn, &backend).await;
-            if let Err(err) = &ret {
-                // TODO: Make the filesystem readonly?
-                log::error!("Failed to synchronize with remote: {err:#}");
+            match &ret {
+                Ok(timestamp) => {
+                    last_sync_timestamp.store(*timestamp, Ordering::Relaxed);
+                }
+                Err(err) => {
+                    // TODO: Make the filesystem readonly?
+                    log::error!("Failed to synchronize with remote: {err:#}");
+                }
             }
             if let Some(callback) = callback {
-                let _: Result<_, _> = callback.send(ret);
+                let _: Result<_, _> = callback.send(ret.map(drop));
             };
         }
     }
 
-    async fn apply_remote_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<()> {
+    async fn apply_remote_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<u64> {
         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let prev_delta_url = txn
@@ -287,12 +298,18 @@ impl<B: Backend> Vfs<B> {
 
         txn.commit()?;
 
-        Ok(())
+        Ok(fetch_timestamp)
     }
 
-    // TODO: Auto sync.
     fn ttl(&self) -> Duration {
-        Duration::MAX
+        let secs = self
+            .last_sync_timestamp
+            .load(Ordering::Relaxed)
+            .saturating_add(SYNC_PERIOD.as_secs())
+            // Additional 1sec more TTL for the subsecond part.
+            .saturating_add(1)
+            .saturating_sub(current_timestamp());
+        Duration::from_secs(secs)
     }
 
     fn parse_attr(&self, row: &rusqlite::Row<'_>) -> FileAttr {
