@@ -222,12 +222,20 @@ async fn main_mount(opt: OptMount) -> Result<()> {
             onedrive,
             download_client,
         };
-        let vfs = vfs2::Vfs::new(backend, conn, config.permission)
-            .await
-            .context("failed to initialize vfs")?;
-        let fs = vfs2::FuseFs(vfs);
-        tokio::task::spawn_blocking(move || fuser::mount2(fs, &opt.mount_point, &fuse_options))
-            .await??;
+
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let vfs = vfs2::Vfs::new(backend, conn, config.permission)
+                    .await
+                    .context("failed to initialize vfs")?;
+                let fs = vfs2::FuseFs(vfs);
+                tokio::task::spawn_blocking(move || {
+                    fuser::mount2(fs, &opt.mount_point, &fuse_options)
+                })
+                .await??;
+                anyhow::Ok(())
+            })
+            .await?;
     }
     Ok(())
 }

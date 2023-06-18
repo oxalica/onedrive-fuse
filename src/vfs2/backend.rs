@@ -25,7 +25,7 @@ pub struct OnedriveBackend {
     pub download_client: Client,
 }
 
-pub trait Backend {
+pub trait Backend: Clone + Send + 'static {
     fn fetch_changes(&self, delta_url: Option<String>) -> BoxFuture<'static, Result<ChangeStream>>;
     fn download(&self, id: String, offset: u64) -> Pin<Box<dyn AsyncRead + Send + 'static>>;
 }

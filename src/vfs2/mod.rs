@@ -21,6 +21,9 @@ use crate::config::PermissionConfig;
 use self::backend::ItemChange;
 pub use self::backend::{Backend, FullSyncRequired, OnedriveBackend};
 
+// TODO: Configurable.
+const SYNC_PERIOD: Duration = Duration::from_secs(60);
+
 const BLOCK_SIZE: u32 = 512;
 
 const _: [(); 1] = [(); (fuser::FUSE_ROOT_ID == 1) as usize];
@@ -72,6 +75,8 @@ pub struct Vfs<B> {
     permission: PermissionConfig,
     backend: B,
     file_streams: HashMap<u64, FileStreams>,
+
+    sync_thread: tokio::task::JoinHandle<()>,
 }
 
 struct FileStreams {
@@ -84,28 +89,61 @@ struct FileStreams {
 
 type Reader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 
+impl<B> Drop for Vfs<B> {
+    fn drop(&mut self) {
+        self.sync_thread.abort();
+    }
+}
+
 impl<B: Backend> Vfs<B> {
     const INIT_SQL: &'static str = include_str!("./init.sql");
 
     pub async fn new(
         backend: B,
-        conn: Connection,
+        mut conn: Connection,
         permission: PermissionConfig,
     ) -> anyhow::Result<Self> {
         conn.execute_batch(Self::INIT_SQL)?;
-        let mut this = Self {
+
+        // Try to clone the connection and report possible errors early.
+        // XXX: This is a bit fishy. Could we do better?
+        let path = conn.path().context("missing database path")?;
+        let sync_conn = Connection::open(path).context("failed to reconnect to the database")?;
+
+        // Apply initial changes first.
+        Self::apply_remote_changes(&mut conn, &backend).await?;
+
+        // Workaround: `Transaction` is `!Send` and kept across `await` point, causing the future
+        // to be `!Send`.
+        let sync_thread =
+            tokio::task::spawn_local(Self::sync_thread(sync_conn, backend.clone(), SYNC_PERIOD));
+
+        Ok(Self {
             conn,
             permission,
             backend,
             file_streams: HashMap::new(),
-        };
-        this.apply_remote_changes().await?;
-        Ok(this)
+            sync_thread,
+        })
     }
 
-    async fn apply_remote_changes(&mut self) -> anyhow::Result<()> {
-        let prev_delta_url = self
-            .conn
+    async fn sync_thread(mut conn: Connection, backend: B, period: Duration) {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the first immediate tick.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(err) = Self::apply_remote_changes(&mut conn, &backend).await {
+                log::error!("Failed to synchronize with remote: {err:#}");
+            }
+        }
+    }
+
+    async fn apply_remote_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<()> {
+        let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let prev_delta_url = txn
             .query_row(r"SELECT * FROM sync LIMIT 1", params![], |row| {
                 row.get::<_, String>("delta_url")
             })
@@ -113,21 +151,17 @@ impl<B: Backend> Vfs<B> {
 
         let mut is_full_sync = prev_delta_url.is_none();
 
-        let mut stream = match self.backend.fetch_changes(prev_delta_url).await {
+        let mut stream = match backend.fetch_changes(prev_delta_url).await {
             Ok(stream) => stream,
             Err(err) if err.is::<FullSyncRequired>() => {
                 log::warn!("{err}");
                 is_full_sync = true;
-                self.backend.fetch_changes(None).await?
+                backend.fetch_changes(None).await?
             }
             Err(err) => return Err(err),
         };
 
         let fetch_timestamp = current_timestamp();
-
-        let txn = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         if is_full_sync {
             txn.execute(r"DELETE FROM item", params![])?;
