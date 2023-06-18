@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{bail, ensure, Context};
+use anyhow::Context;
 use fuser::{FileAttr, FileType};
 use futures::future::Either;
 use futures::{AsyncRead, AsyncReadExt, Future, StreamExt};
@@ -18,6 +18,7 @@ pub use fuse_fs::FuseFs;
 
 use crate::config::PermissionConfig;
 
+use self::backend::ItemChange;
 pub use self::backend::{Backend, FullSyncRequired, OnedriveBackend};
 
 const BLOCK_SIZE: u32 = 512;
@@ -164,7 +165,7 @@ impl<B: Backend> Vfs<B> {
             )?;
 
             loop {
-                let item = match stream.next().await.context("missing delta_url")?? {
+                let change = match stream.next().await.context("missing delta_url")?? {
                     Either::Left(item) => item,
                     Either::Right(delta_url) => break delta_url,
                 };
@@ -174,82 +175,48 @@ impl<B: Backend> Vfs<B> {
                     log::info!("Got {change_cnt} remote changes...");
                 }
 
-                let id = item.id.as_ref().expect("missing id").as_str();
+                let to_timestamp = |time: SystemTime| {
+                    time.duration_since(SystemTime::UNIX_EPOCH)
+                        .expect("post UNIX epoch")
+                        .as_secs()
+                };
 
-                if item.deleted.is_some() {
-                    ensure!(item.root.is_none(), "cannot delete root");
-                    delete_stmt.execute(params![id])?;
-                    continue;
-                }
-
-                let ret = (|| {
-                    let fsinfo = item
-                        .file_system_info
-                        .as_ref()
-                        .context("missing fileSystemInfo")?;
-                    let parse_time = |field: &str| {
-                        let time = fsinfo
-                            .get(field)
-                            .and_then(|v| v.as_str())
-                            .context("missing field")?;
-                        humantime::parse_rfc3339(time)
-                            .with_context(|| format!("invalid format: {time:?}"))
-                    };
-                    let created_time = parse_time("createdDateTime")
-                        .context("failed to get creation time")?
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs();
-                    let modified_time = parse_time("lastModifiedDateTime")
-                        .context("failed to get modified time")?
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs();
-
-                    if item.root.is_some() {
+                match change {
+                    ItemChange::RootUpdate {
+                        id,
+                        created_time,
+                        modified_time,
+                    } => {
                         insert_root_stmt.execute(named_params! {
                             ":id": id,
-                            ":created_time": created_time,
-                            ":modified_time": modified_time,
+                            ":created_time": to_timestamp(created_time),
+                            ":modified_time": to_timestamp(modified_time),
                         })?;
-                        return Ok(());
                     }
-
-                    let name = item
-                        .name
-                        .as_ref()
-                        .filter(|name| !name.is_empty())
-                        .context("missing name")?;
-                    let is_dir = match (item.file.is_some(), item.folder.is_some()) {
-                        (true, false) => false,
-                        (false, true) => true,
-                        _ => bail!("unknown file type"),
-                    };
-                    let size = if is_dir {
-                        0
-                    } else {
-                        *item.size.as_ref().context("missing size")?
-                    };
-                    let parent_id = (|| item.parent_reference.as_ref()?.get("id")?.as_str())()
-                        .context("missing parent id")?;
-                    let changed = insert_child_stmt.execute(named_params! {
-                        ":id": id,
-                        ":is_directory": is_dir,
-                        ":name": name,
-                        ":size": size,
-                        ":parent_id": parent_id,
-                        ":created_time": created_time,
-                        ":modified_time": modified_time,
-                    })?;
-                    ensure!(changed != 0, "missing parent directory");
-                    Ok(())
-                })();
-                if let Err(err) = ret {
-                    log::warn!(
-                        "Ignoring {} (name={:?}, parent={:?}): {}",
+                    ItemChange::Update {
                         id,
-                        item.name,
-                        item.parent_reference,
-                        err,
-                    );
+                        parent_id,
+                        name,
+                        is_directory,
+                        size,
+                        created_time,
+                        modified_time,
+                    } => {
+                        insert_child_stmt.execute(named_params! {
+                            ":id": id,
+                            ":parent_id": parent_id,
+                            ":name": name,
+                            ":is_directory": is_directory,
+                            ":size": size,
+                            ":created_time": to_timestamp(created_time),
+                            ":modified_time": to_timestamp(modified_time),
+                        })?;
+                    }
+                    ItemChange::Delete { id } => {
+                        delete_stmt.execute(named_params! {
+                            ":id": id,
+                        })?;
+                    }
                 }
             }
         };
