@@ -473,7 +473,7 @@ impl FileStreamState {
                 Some(chunk) => chunk,
                 None => return Err(Error::DownloadFailed),
             };
-            let advance = self.buf.feed(&*chunk);
+            let advance = self.buf.feed(&chunk);
             self.buf_start_pos += advance as u64;
         }
 
