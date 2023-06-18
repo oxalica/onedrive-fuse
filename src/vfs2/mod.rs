@@ -11,7 +11,7 @@ use futures::future::Either;
 use futures::{AsyncRead, AsyncReadExt, Future, StreamExt};
 use nix::errno::Errno;
 use rusqlite::{
-    named_params, params, Connection, DropBehavior, OptionalExtension, TransactionBehavior,
+    named_params, params, types, Connection, DropBehavior, OptionalExtension, TransactionBehavior,
 };
 
 mod backend;
@@ -75,6 +75,44 @@ impl From<rusqlite::Error> for Error {
             return Self::NotFound;
         }
         panic!("sqlite error: {err}");
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Timestamp(u64);
+
+impl Timestamp {
+    /// Current time but clamped to the uniform precision (1s for now).
+    fn now() -> Self {
+        SystemTime::now().into()
+    }
+}
+
+impl From<SystemTime> for Timestamp {
+    fn from(t: SystemTime) -> Self {
+        let ts = t
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("must be post UNIX epoch");
+        Self(ts.as_secs())
+    }
+}
+
+impl From<Timestamp> for SystemTime {
+    fn from(t: Timestamp) -> Self {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(t.0)
+    }
+}
+
+impl types::ToSql for Timestamp {
+    fn to_sql(&self) -> rusqlite::Result<types::ToSqlOutput<'_>> {
+        let ts = self.0 as i64;
+        Ok(types::ToSqlOutput::Borrowed(types::ValueRef::Integer(ts)))
+    }
+}
+
+impl types::FromSql for Timestamp {
+    fn column_result(value: types::ValueRef<'_>) -> types::FromSqlResult<Self> {
+        Ok(Self(value.as_i64()? as u64))
     }
 }
 
@@ -159,12 +197,6 @@ impl<'conn> RemoteChangeCommitter<'conn> {
     }
 
     fn execute(&mut self, change: &RemoteItemChange) -> rusqlite::Result<()> {
-        let to_timestamp = |time: SystemTime| {
-            time.duration_since(SystemTime::UNIX_EPOCH)
-                .expect("post UNIX epoch")
-                .as_secs()
-        };
-
         match change {
             RemoteItemChange::RootUpdate {
                 id,
@@ -173,8 +205,8 @@ impl<'conn> RemoteChangeCommitter<'conn> {
             } => {
                 self.insert_root_stmt.execute(named_params! {
                     ":id": id,
-                    ":created_time": to_timestamp(*created_time),
-                    ":modified_time": to_timestamp(*modified_time),
+                    ":created_time": Timestamp::from(*created_time),
+                    ":modified_time": Timestamp::from(*modified_time),
                 })?;
             }
             RemoteItemChange::Update {
@@ -192,8 +224,8 @@ impl<'conn> RemoteChangeCommitter<'conn> {
                     ":name": name,
                     ":is_directory": is_directory,
                     ":size": size,
-                    ":created_time": to_timestamp(*created_time),
-                    ":modified_time": to_timestamp(*modified_time),
+                    ":created_time": Timestamp::from(*created_time),
+                    ":modified_time": Timestamp::from(*modified_time),
                 })?;
             }
             RemoteItemChange::Delete { id } => {
@@ -225,7 +257,7 @@ impl<B: Backend> Vfs<B> {
         let init_timestamp = Self::pull_remote_changes(&mut conn, &backend).await?;
 
         let (sync_trigger, sync_trigger_rx) = mpsc::channel(1);
-        let last_sync_timestamp = Arc::new(AtomicU64::new(init_timestamp));
+        let last_sync_timestamp = Arc::new(AtomicU64::new(init_timestamp.0));
         // Workaround: `Transaction` is `!Send` and kept across `await` point, causing the future
         // to be `!Send`.
         let sync_thread = task::spawn_local(Self::sync_thread(
@@ -275,7 +307,7 @@ impl<B: Backend> Vfs<B> {
             let ret = Self::pull_remote_changes(&mut conn, &backend).await;
             match &ret {
                 Ok(timestamp) => {
-                    last_sync_timestamp.store(*timestamp, Ordering::Relaxed);
+                    last_sync_timestamp.store(timestamp.0, Ordering::Relaxed);
                 }
                 Err(err) => {
                     // TODO: Make the filesystem readonly?
@@ -328,10 +360,8 @@ impl<B: Backend> Vfs<B> {
                 anyhow::Ok(LocalItemChange::CreateDirectory {
                     parent_id: row.get("parent_id")?,
                     child_path: row.get("child_path")?,
-                    created_time: SystemTime::UNIX_EPOCH
-                        + Duration::from_secs(row.get("created_time")?),
-                    modified_time: SystemTime::UNIX_EPOCH
-                        + Duration::from_secs(row.get("modified_time")?),
+                    created_time: row.get::<_, Timestamp>("created_time")?.into(),
+                    modified_time: row.get::<_, Timestamp>("modified_time")?.into(),
                 })
             })?
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -357,7 +387,7 @@ impl<B: Backend> Vfs<B> {
         Ok(responses_len)
     }
 
-    async fn pull_remote_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<u64> {
+    async fn pull_remote_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<Timestamp> {
         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let prev_delta_url = txn
@@ -378,7 +408,7 @@ impl<B: Backend> Vfs<B> {
             Err(err) => return Err(err),
         };
 
-        let fetch_timestamp = current_timestamp();
+        let fetch_timestamp = Timestamp::now();
 
         if is_full_sync {
             txn.execute(r"DELETE FROM item", params![])?;
@@ -425,7 +455,7 @@ impl<B: Backend> Vfs<B> {
             .saturating_add(SYNC_PERIOD.as_secs())
             // Additional 1sec more TTL for the subsecond part.
             .saturating_add(1)
-            .saturating_sub(current_timestamp());
+            .saturating_sub(Timestamp::now().0);
         Duration::from_secs(secs)
     }
 
@@ -438,8 +468,8 @@ impl<B: Backend> Vfs<B> {
             (FileType::RegularFile, self.permission.file_permission())
         };
         let size = row.get_unwrap::<_, Option<u64>>("size").unwrap_or(0);
-        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(row.get_unwrap("modified_time"));
-        let crtime = SystemTime::UNIX_EPOCH + Duration::from_secs(row.get_unwrap("created_time"));
+        let crtime = row.get_unwrap::<_, Timestamp>("created_time").into();
+        let mtime = row.get_unwrap::<_, Timestamp>("modified_time").into();
         FileAttr {
             ino,
             size,
@@ -603,7 +633,7 @@ impl<B: Backend> Vfs<B> {
         parent_ino: u64,
         child_name: &str,
     ) -> Result<(Duration, FileAttr)> {
-        let timestamp = current_timestamp();
+        let timestamp = Timestamp::now();
 
         let changed = self.conn.execute(
             r"
@@ -624,7 +654,7 @@ impl<B: Backend> Vfs<B> {
 
         // XXX: Should we cache items not uploaded yet?
         let ttl = Duration::ZERO;
-        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp);
+        let time = timestamp.into();
         let attr = FileAttr {
             ino,
             size: 0,
@@ -644,11 +674,4 @@ impl<B: Backend> Vfs<B> {
         };
         Ok((ttl, attr))
     }
-}
-
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("post epoch")
-        .as_secs()
 }
