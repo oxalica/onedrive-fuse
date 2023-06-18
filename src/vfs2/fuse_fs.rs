@@ -160,4 +160,32 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
             Err(err) => reply.error(err.into()),
         }
     }
+
+    fn fsyncdir(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        self.fsync(req, ino, fh, datasync, reply);
+    }
+
+    fn fsync(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let fut = self.0.sync();
+        tokio::spawn(async move {
+            match fut.await {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(err.into()),
+            }
+        });
+    }
 }

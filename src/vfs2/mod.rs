@@ -15,6 +15,8 @@ mod backend;
 mod fuse_fs;
 
 pub use fuse_fs::FuseFs;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task;
 
 use crate::config::PermissionConfig;
 
@@ -40,7 +42,7 @@ pub enum Error {
 
     // API errors.
     #[error("network error during download")]
-    Network(#[source] std::io::Error),
+    Network(#[source] anyhow::Error),
     #[error("read stream poisoned")]
     Poisoned,
 }
@@ -76,8 +78,11 @@ pub struct Vfs<B> {
     backend: B,
     file_streams: HashMap<u64, FileStreams>,
 
-    sync_thread: tokio::task::JoinHandle<()>,
+    sync_thread: task::JoinHandle<()>,
+    sync_trigger: mpsc::Sender<SyncCallback>,
 }
+
+type SyncCallback = oneshot::Sender<anyhow::Result<()>>;
 
 struct FileStreams {
     ref_count: usize,
@@ -113,10 +118,14 @@ impl<B: Backend> Vfs<B> {
         // Apply initial changes first.
         Self::apply_remote_changes(&mut conn, &backend).await?;
 
+        let (sync_trigger, sync_trigger_rx) = mpsc::channel(1);
         // Workaround: `Transaction` is `!Send` and kept across `await` point, causing the future
         // to be `!Send`.
-        let sync_thread =
-            tokio::task::spawn_local(Self::sync_thread(sync_conn, backend.clone(), SYNC_PERIOD));
+        let sync_thread = task::spawn_local(Self::sync_thread(
+            sync_conn,
+            backend.clone(),
+            sync_trigger_rx,
+        ));
 
         Ok(Self {
             conn,
@@ -124,19 +133,29 @@ impl<B: Backend> Vfs<B> {
             backend,
             file_streams: HashMap::new(),
             sync_thread,
+            sync_trigger,
         })
     }
 
-    async fn sync_thread(mut conn: Connection, backend: B, period: Duration) {
-        let mut interval = tokio::time::interval(period);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Skip the first immediate tick.
-        interval.tick().await;
+    async fn sync_thread(
+        mut conn: Connection,
+        backend: B,
+        mut sync_trigger: mpsc::Receiver<SyncCallback>,
+    ) {
         loop {
-            interval.tick().await;
-            if let Err(err) = Self::apply_remote_changes(&mut conn, &backend).await {
+            let callback = match tokio::time::timeout(SYNC_PERIOD, sync_trigger.recv()).await {
+                Ok(Some(callback)) => Some(callback),
+                Err(_elapsed) => None,
+                Ok(None) => return,
+            };
+            let ret = Self::apply_remote_changes(&mut conn, &backend).await;
+            if let Err(err) = &ret {
+                // TODO: Make the filesystem readonly?
                 log::error!("Failed to synchronize with remote: {err:#}");
             }
+            if let Some(callback) = callback {
+                let _: Result<_, _> = callback.send(ret);
+            };
         }
     }
 
@@ -420,13 +439,29 @@ impl<B: Backend> Vfs<B> {
                 .as_mut()
                 .read_exact(&mut buf)
                 .await
-                .map_err(Error::Network)?;
+                .map_err(|err| Error::Network(err.into()))?;
             if let Some(readers) = readers.upgrade() {
                 let new_pos = offset + len as u64;
                 readers.lock().unwrap().insert(new_pos, reader);
             }
             Ok(buf)
         }))
+    }
+
+    pub fn sync(&mut self) -> impl Future<Output = Result<()>> + 'static {
+        let (ret_tx, ret_rx) = oneshot::channel();
+        let sync_trigger = self.sync_trigger.clone();
+        async move {
+            sync_trigger
+                .send(ret_tx)
+                .await
+                .expect("sync thread aborted");
+            ret_rx
+                .await
+                .expect("sync thread aborted")
+                .context("sync failed")
+                .map_err(Error::Network)
+        }
     }
 }
 
