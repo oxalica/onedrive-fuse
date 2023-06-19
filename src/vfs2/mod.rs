@@ -116,6 +116,36 @@ impl types::FromSql for Timestamp {
     }
 }
 
+fn parse_attr(row: &rusqlite::Row<'_>, permission: &PermissionConfig) -> FileAttr {
+    let ino = row.get_unwrap("ino");
+    let is_dir = row.get_unwrap("is_directory");
+    let (kind, perm) = if is_dir {
+        (FileType::Directory, permission.dir_permission())
+    } else {
+        (FileType::RegularFile, permission.file_permission())
+    };
+    let size = row.get_unwrap::<_, Option<u64>>("size").unwrap_or(0);
+    let crtime = row.get_unwrap::<_, Timestamp>("created_time").into();
+    let mtime = row.get_unwrap::<_, Timestamp>("modified_time").into();
+    FileAttr {
+        ino,
+        size,
+        blocks: (size + (u64::from(BLOCK_SIZE) - 1)) / u64::from(BLOCK_SIZE),
+        mtime,
+        crtime,
+        atime: mtime,
+        ctime: mtime,
+        kind,
+        perm: perm as _,
+        nlink: 1,
+        uid: permission.uid,
+        gid: permission.gid,
+        rdev: 0,
+        blksize: BLOCK_SIZE,
+        flags: 0,
+    }
+}
+
 pub struct Vfs<B> {
     conn: Connection,
     permission: PermissionConfig,
@@ -148,6 +178,7 @@ impl<B> Drop for Vfs<B> {
 struct RemoteChangeCommitter<'conn> {
     update_stmt: rusqlite::Statement<'conn>,
     delete_stmt: rusqlite::Statement<'conn>,
+    clear_dirty_time_stmt: rusqlite::Statement<'conn>,
 }
 
 impl<'conn> RemoteChangeCommitter<'conn> {
@@ -176,6 +207,7 @@ impl<'conn> RemoteChangeCommitter<'conn> {
                 is_directory = :is_directory,
                 created_time = :created_time,
                 modified_time = :modified_time
+            RETURNING ino
             ",
         )?;
         let delete_stmt = conn.prepare(
@@ -184,13 +216,20 @@ impl<'conn> RemoteChangeCommitter<'conn> {
             WHERE id = :id
             ",
         )?;
+        let clear_dirty_time_stmt = conn.prepare(
+            r"
+            DELETE FROM dirty_item
+            WHERE ino = :ino
+            ",
+        )?;
         Ok(Self {
             update_stmt,
             delete_stmt,
+            clear_dirty_time_stmt,
         })
     }
 
-    fn execute(&mut self, change: &RemoteItemChange) -> rusqlite::Result<()> {
+    fn execute(&mut self, change: &RemoteItemChange, clear_dirty: bool) -> rusqlite::Result<()> {
         match change {
             RemoteItemChange::Update {
                 id,
@@ -201,15 +240,26 @@ impl<'conn> RemoteChangeCommitter<'conn> {
                 created_time,
                 modified_time,
             } => {
-                self.update_stmt.execute(named_params! {
-                    ":id": id,
-                    ":parent_id": parent_id,
-                    ":name": name,
-                    ":is_directory": is_directory,
-                    ":size": size,
-                    ":created_time": Timestamp::from(*created_time),
-                    ":modified_time": Timestamp::from(*modified_time),
-                })?;
+                let ino = self
+                    .update_stmt
+                    .query_row(
+                        named_params! {
+                            ":id": id,
+                            ":parent_id": parent_id,
+                            ":name": name,
+                            ":is_directory": is_directory,
+                            ":size": size,
+                            ":created_time": Timestamp::from(*created_time),
+                            ":modified_time": Timestamp::from(*modified_time),
+                        },
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .optional()?;
+                if let (Some(ino), true) = (ino, clear_dirty) {
+                    self.clear_dirty_time_stmt.execute(named_params! {
+                        ":ino": ino,
+                    })?;
+                }
             }
             RemoteItemChange::Delete { id } => {
                 self.delete_stmt.execute(named_params! {
@@ -314,7 +364,7 @@ impl<B: Backend> Vfs<B> {
             .prepare(
                 r"
                 WITH RECURSIVE
-                    dirty_item(ino, parent_id, child_path, created_time, modified_time) AS (
+                    new_dir(ino, parent_id, child_path, created_time, modified_time) AS (
                         SELECT
                             item.ino,
                             parent.id,
@@ -322,7 +372,8 @@ impl<B: Backend> Vfs<B> {
                             item.created_time,
                             item.modified_time
                         FROM item
-                        JOIN item AS parent ON parent.ino = item.parent_ino AND parent.id IS NOT NULL
+                        JOIN item AS parent ON parent.ino = item.parent_ino AND
+                            parent.id IS NOT NULL
                         WHERE item.id IS NULL
 
                         UNION ALL
@@ -332,19 +383,39 @@ impl<B: Backend> Vfs<B> {
                             child_path || '/' || item.name,
                             item.created_time,
                             item.modified_time
-                        FROM dirty_item
-                        JOIN item ON item.parent_ino = dirty_item.ino
+                        FROM new_dir
+                        JOIN item ON item.parent_ino = new_dir.ino
+                        WHERE item.id IS NULL
                     )
-                SELECT * FROM dirty_item
+                SELECT parent_id, child_path, created_time, modified_time
+                FROM new_dir
+
+                UNION ALL
+                SELECT id, NULL, created_time, modified_time
+                FROM dirty_item
+                JOIN item USING (ino)
+                WHERE id IS NOT NULL
+
                 LIMIT ?
                 ",
             )?
             .query_and_then(params![max_len], |row| {
-                anyhow::Ok(LocalItemChange::CreateDirectory {
-                    parent_id: row.get("parent_id")?,
-                    child_path: row.get("child_path")?,
-                    created_time: row.get::<_, Timestamp>("created_time")?.into(),
-                    modified_time: row.get::<_, Timestamp>("modified_time")?.into(),
+                let id = row.get::<_, String>(0)?;
+                let child_path = row.get::<_, Option<String>>(1)?;
+                let created_time = row.get::<_, Timestamp>(2)?.into();
+                let modified_time = row.get::<_, Timestamp>(3)?.into();
+                Ok(match child_path {
+                    Some(child_path) => LocalItemChange::CreateDirectory {
+                        parent_id: id,
+                        child_path,
+                        created_time,
+                        modified_time,
+                    },
+                    None => LocalItemChange::UpdateTime {
+                        id,
+                        created_time,
+                        modified_time,
+                    },
                 })
             })?
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -361,7 +432,7 @@ impl<B: Backend> Vfs<B> {
             let mut committer = RemoteChangeCommitter::new(&txn)?;
             for ret in responses {
                 // TODO: Make this fail-safe.
-                committer.execute(&ret?)?;
+                committer.execute(&ret?, true)?;
             }
         }
         log::info!("Pushed {responses_len} local changes");
@@ -441,7 +512,8 @@ impl<B: Backend> Vfs<B> {
                     log::info!("Got {change_cnt} remote changes...");
                 }
 
-                committer.execute(&change)?;
+                // TODO: Handle conflicts.
+                committer.execute(&change, false)?;
             }
         };
         if change_cnt != 0 {
@@ -473,43 +545,14 @@ impl<B: Backend> Vfs<B> {
     }
 
     fn parse_attr(&self, row: &rusqlite::Row<'_>) -> FileAttr {
-        let ino = row.get_unwrap("ino");
-        let is_dir = row.get_unwrap("is_directory");
-        let (kind, perm) = if is_dir {
-            (FileType::Directory, self.permission.dir_permission())
-        } else {
-            (FileType::RegularFile, self.permission.file_permission())
-        };
-        let size = row.get_unwrap::<_, Option<u64>>("size").unwrap_or(0);
-        let crtime = row.get_unwrap::<_, Timestamp>("created_time").into();
-        let mtime = row.get_unwrap::<_, Timestamp>("modified_time").into();
-        FileAttr {
-            ino,
-            size,
-            blocks: (size + (u64::from(BLOCK_SIZE) - 1)) / u64::from(BLOCK_SIZE),
-            mtime,
-            crtime,
-            atime: mtime,
-            ctime: mtime,
-            kind,
-            perm: perm as _,
-            nlink: 1,
-            uid: self.permission.uid,
-            gid: self.permission.gid,
-            rdev: 0,
-            blksize: BLOCK_SIZE,
-            flags: 0,
-        }
+        parse_attr(row, &self.permission)
     }
 
     pub fn lookup(&self, parent_ino: u64, child_name: &str) -> Result<(FileAttr, Duration)> {
         Ok(self.conn.query_row(
             r"SELECT * FROM item WHERE parent_ino = ? AND name = ?",
             params![parent_ino, child_name],
-            |row| {
-                let attr = self.parse_attr(row);
-                Ok((attr, self.ttl()))
-            },
+            |row| Ok((self.parse_attr(row), self.ttl())),
         )?)
     }
 
@@ -685,6 +728,49 @@ impl<B: Backend> Vfs<B> {
             blksize: BLOCK_SIZE,
             flags: 0,
         };
+        Ok((ttl, attr))
+    }
+
+    pub fn set_time(
+        &mut self,
+        ino: u64,
+        created_time: Option<SystemTime>,
+        modified_time: Option<SystemTime>,
+    ) -> Result<(Duration, FileAttr)> {
+        assert!(created_time.is_some() || modified_time.is_some());
+
+        let txn = self.conn.transaction()?;
+        let (has_id, attr) = txn.query_row(
+            r"
+            UPDATE item SET
+                created_time = COALESCE(:created_time, created_time),
+                modified_time = COALESCE(:modified_time, modified_time)
+            WHERE ino = :ino
+            RETURNING *
+            ",
+            named_params! {
+                ":ino": ino,
+                ":created_time": created_time.map(Timestamp::from),
+                ":modified_time": modified_time.map(Timestamp::from),
+            },
+            |row| {
+                let has_id = row.get_ref("id")? != types::ValueRef::Null;
+                let attr = parse_attr(row, &self.permission);
+                Ok((has_id, attr))
+            },
+        )?;
+        // Only set it dirty if it is fresh on remote side currently.
+        if has_id {
+            txn.execute(
+                r"
+                INSERT OR IGNORE INTO dirty_item (ino) VALUES (?)
+                ",
+                params![ino],
+            )?;
+        }
+        txn.commit()?;
+
+        let ttl = self.ttl();
         Ok((ttl, attr))
     }
 }

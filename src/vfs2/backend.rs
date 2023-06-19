@@ -72,6 +72,11 @@ pub enum LocalItemChange {
         created_time: SystemTime,
         modified_time: SystemTime,
     },
+    UpdateTime {
+        id: String,
+        created_time: SystemTime,
+        modified_time: SystemTime,
+    },
 }
 
 #[derive(Clone)]
@@ -315,11 +320,18 @@ struct BatchSubResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RawItemRequest {
-    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     file_system_info: FileSystemInfo,
-    folder: EmptySet,
-    #[serde(rename = "@microsoft.graph.conflictBehavior")]
-    conflict_behavior: ConflictBehavior,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder: Option<EmptySet>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "@microsoft.graph.conflictBehavior"
+    )]
+    conflict_behavior: Option<ConflictBehavior>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,10 +358,10 @@ struct EmptySet {}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileSystemInfo {
-    #[serde(with = "humantime_serde")]
-    created_date_time: SystemTime,
-    #[serde(with = "humantime_serde")]
-    last_modified_date_time: SystemTime,
+    #[serde(rename = "createdDateTime", with = "humantime_serde")]
+    created_time: SystemTime,
+    #[serde(rename = "lastModifiedDateTime", with = "humantime_serde")]
+    modified_time: SystemTime,
 }
 
 // TODO: Merge this with `DriveItem` parser.
@@ -368,8 +380,8 @@ impl TryFrom<RawItemResponse> for RemoteItemChange {
             name: item.name,
             is_directory: item.folder.is_some(),
             size: if item.folder.is_some() { 0 } else { item.size },
-            created_time: item.file_system_info.created_date_time,
-            modified_time: item.file_system_info.last_modified_date_time,
+            created_time: item.file_system_info.created_time,
+            modified_time: item.file_system_info.modified_time,
         })
     }
 }
@@ -434,10 +446,10 @@ impl TryFrom<DriveItem> for RemoteItemChange {
 
 impl LocalItemChange {
     fn to_request_inner(&self) -> BatchSubRequestInner {
-        match self {
+        match *self {
             LocalItemChange::CreateDirectory {
-                parent_id,
-                child_path,
+                ref parent_id,
+                ref child_path,
                 created_time,
                 modified_time,
             } => {
@@ -450,17 +462,38 @@ impl LocalItemChange {
                         content_type: ContentType::ApplicationJson,
                     },
                     body: RawItemRequest {
-                        folder: EmptySet {},
-                        // NB. This does nothing if the target exists and is also a directory.
-                        conflict_behavior: ConflictBehavior::Fail,
-                        name: name.to_owned(),
+                        folder: Some(EmptySet {}),
+                        conflict_behavior: Some(ConflictBehavior::Fail),
+                        name: Some(name.to_owned()),
                         file_system_info: FileSystemInfo {
-                            created_date_time: *created_time,
-                            last_modified_date_time: *modified_time,
+                            created_time,
+                            modified_time,
                         },
+                        id: None,
                     },
                 }
             }
+            LocalItemChange::UpdateTime {
+                ref id,
+                created_time,
+                modified_time,
+            } => BatchSubRequestInner {
+                method: "PATCH",
+                url: format!("/drives/me/items/{id}"),
+                headers: Headers {
+                    content_type: ContentType::ApplicationJson,
+                },
+                body: RawItemRequest {
+                    id: Some(id.clone()),
+                    file_system_info: FileSystemInfo {
+                        created_time,
+                        modified_time,
+                    },
+                    name: None,
+                    folder: None,
+                    conflict_behavior: None,
+                },
+            },
         }
     }
 }

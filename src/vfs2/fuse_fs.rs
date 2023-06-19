@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::ops::ControlFlow;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use fuser::{consts, Request};
 
@@ -192,6 +192,44 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
                 Err(err) => reply.error(err.into()),
             }
         });
+    }
+
+    fn setattr(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+        reply: fuser::ReplyAttr,
+    ) {
+        if mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some() {
+            return reply.error(libc::EPERM);
+        }
+        if size.is_some() {
+            // TODO: Truncation.
+            return reply.error(libc::EPERM);
+        }
+        if crtime.is_some() || mtime.is_some() {
+            let mtime = mtime.map(|t| match t {
+                fuser::TimeOrNow::SpecificTime(t) => t,
+                fuser::TimeOrNow::Now => SystemTime::now(),
+            });
+            return match self.0.set_time(ino, crtime, mtime) {
+                Ok((ttl, attr)) => reply.attr(&ttl, &attr),
+                Err(err) => reply.error(err.into()),
+            };
+        }
+        self.getattr(req, ino, reply);
     }
 
     fn mkdir(
