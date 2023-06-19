@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{ensure, Context};
+use anyhow::{bail, ensure, Context};
 use fuser::{FileAttr, FileType};
 use futures::future::Either;
 use futures::{AsyncRead, AsyncReadExt, Future, StreamExt};
@@ -146,27 +146,21 @@ impl<B> Drop for Vfs<B> {
 }
 
 struct RemoteChangeCommitter<'conn> {
-    insert_root_stmt: rusqlite::Statement<'conn>,
-    insert_child_stmt: rusqlite::Statement<'conn>,
+    update_stmt: rusqlite::Statement<'conn>,
     delete_stmt: rusqlite::Statement<'conn>,
 }
 
 impl<'conn> RemoteChangeCommitter<'conn> {
     fn new(conn: &'conn rusqlite::Connection) -> rusqlite::Result<Self> {
-        let insert_root_stmt = conn.prepare(
-            r"
-            INSERT OR REPLACE INTO item (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
-            VALUES (1, :id, TRUE, NULL, NULL, 0, :created_time, :modified_time)
-            ",
-        )?;
-        let insert_child_stmt = conn.prepare(
+        let update_stmt = conn.prepare(
             r"
             INSERT INTO item
-            (id, is_directory, parent_ino, name, size, created_time, modified_time)
-            SELECT :id, :is_directory, ino, :name, :size, :created_time, :modified_time
+            (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
+            SELECT :ino, :id, :is_directory, ino, :name, :size, :created_time, :modified_time
             FROM item
             WHERE id = :parent_id AND is_directory
-            ON CONFLICT (id) DO UPDATE -- Remote updates.
+            -- Remote item update.
+            ON CONFLICT (id) DO UPDATE
             SET
                 name = :name,
                 size = :size,
@@ -174,7 +168,8 @@ impl<'conn> RemoteChangeCommitter<'conn> {
                 parent_ino = excluded.parent_ino,
                 created_time = :created_time,
                 modified_time = :modified_time
-            ON CONFLICT (parent_ino, name) DO UPDATE -- Pushed new items.
+            -- Pushed new items.
+            ON CONFLICT (parent_ino, name) DO UPDATE
             SET
                 id = :id,
                 size = :size,
@@ -190,25 +185,13 @@ impl<'conn> RemoteChangeCommitter<'conn> {
             ",
         )?;
         Ok(Self {
-            insert_root_stmt,
-            insert_child_stmt,
+            update_stmt,
             delete_stmt,
         })
     }
 
     fn execute(&mut self, change: &RemoteItemChange) -> rusqlite::Result<()> {
         match change {
-            RemoteItemChange::RootUpdate {
-                id,
-                created_time,
-                modified_time,
-            } => {
-                self.insert_root_stmt.execute(named_params! {
-                    ":id": id,
-                    ":created_time": Timestamp::from(*created_time),
-                    ":modified_time": Timestamp::from(*modified_time),
-                })?;
-            }
             RemoteItemChange::Update {
                 id,
                 parent_id,
@@ -218,7 +201,7 @@ impl<'conn> RemoteChangeCommitter<'conn> {
                 created_time,
                 modified_time,
             } => {
-                self.insert_child_stmt.execute(named_params! {
+                self.update_stmt.execute(named_params! {
                     ":id": id,
                     ":parent_id": parent_id,
                     ":name": name,
@@ -412,6 +395,36 @@ impl<B: Backend> Vfs<B> {
 
         if is_full_sync {
             txn.execute(r"DELETE FROM item", params![])?;
+
+            // Initialize root item (ino = 1).
+            // This is necessary so that every later queries can be keyed by item id.
+            match stream.next().await.context("missing root item")?? {
+                Either::Left(RemoteItemChange::Update {
+                    id,
+                    parent_id: None,
+                    name,
+                    is_directory: true,
+                    size: 0,
+                    created_time,
+                    modified_time,
+                }) => {
+                    txn.execute(
+                        r"
+                        INSERT INTO item
+                        (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
+                        VALUES (1, :id, TRUE, NULL, :name, 0, :created_time, :modified_time)
+                        ",
+                        named_params! {
+                            ":id": id,
+                            ":name": name,
+                            ":created_time": Timestamp::from(created_time),
+                            ":modified_time": Timestamp::from(modified_time),
+                        },
+                    )?;
+                }
+                Either::Left(change) => bail!("missing root item, got {change:?}"),
+                Either::Right(_) => bail!("no item returned"),
+            }
         }
 
         let mut change_cnt = 0u64;

@@ -7,14 +7,13 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS item (
     ino             INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     id              TEXT NULL UNIQUE, -- NULL when dirty.
+    parent_ino      INTEGER NULL CHECK ((parent_ino IS NULL) == (ino == 1)),
+    name            TEXT NOT NULL,
+
     is_directory    INTEGER NOT NULL,
-    parent_ino      INTEGER NULL,
-    name            TEXT NULL, -- NULL for root.
     size            INTEGER NOT NULL, -- Zero for directories.
     created_time    INTEGER NOT NULL,
-    modified_time   INTEGER NOT NULL,
-
-    UNIQUE (parent_ino, name)
+    modified_time   INTEGER NOT NULL
 ) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS item_children_by_ino ON item (parent_ino ASC, ino ASC);

@@ -50,14 +50,9 @@ type RemoteChangeStream = BoxStream<'static, Result<Either<RemoteItemChange, Str
 
 #[derive(Debug)]
 pub enum RemoteItemChange {
-    RootUpdate {
-        id: String,
-        created_time: SystemTime,
-        modified_time: SystemTime,
-    },
     Update {
         id: String,
-        parent_id: String,
+        parent_id: Option<String>,
         name: String,
         is_directory: bool,
         size: u64,
@@ -170,6 +165,8 @@ impl Backend for OnedriveBackend {
     ) -> BoxFuture<'static, Result<Vec<Result<RemoteItemChange>>>> {
         let onedrive = self.onedrive.clone();
         Box::pin(async move {
+            log::debug!("Pushing changes: {changes:#?}");
+
             let request_cnt = changes.len();
             let requests = changes
                 .iter()
@@ -320,7 +317,7 @@ struct BatchSubResponse {
 struct RawItemRequest {
     name: String,
     file_system_info: FileSystemInfo,
-    folder: Folder,
+    folder: EmptySet,
     #[serde(rename = "@microsoft.graph.conflictBehavior")]
     conflict_behavior: ConflictBehavior,
 }
@@ -331,7 +328,8 @@ struct RawItemResponse {
     id: String,
     parent_reference: Option<ParentReference>,
     name: String,
-    folder: Option<Folder>,
+    folder: Option<EmptySet>,
+    root: Option<EmptySet>,
     size: u64,
     file_system_info: FileSystemInfo,
 }
@@ -343,7 +341,7 @@ struct ParentReference {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Folder {}
+struct EmptySet {}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -361,7 +359,12 @@ impl TryFrom<RawItemResponse> for RemoteItemChange {
     fn try_from(item: RawItemResponse) -> Result<Self, Self::Error> {
         Ok(Self::Update {
             id: item.id,
-            parent_id: item.parent_reference.expect("TODO: root").id,
+            // Root actually has a special parent item. Here we ignore it to prevent confusion.
+            parent_id: match item.root {
+                Some(_) => None,
+                None => Some(item.parent_reference.context("missing parent")?.id),
+            },
+            // Root also has a name "root". But we do not actually use it.
             name: item.name,
             is_directory: item.folder.is_some(),
             size: if item.folder.is_some() { 0 } else { item.size },
@@ -382,6 +385,8 @@ impl TryFrom<DriveItem> for RemoteItemChange {
             return Ok(Self::Delete { id });
         }
 
+        // Root also has a name "root". But we do not actually use it.
+        let name = item.name.context("missing name")?;
         let fsinfo = item.file_system_info.context("missing fileSystemInfo")?;
         let parse_time = |field: &str| {
             let time = fsinfo
@@ -394,18 +399,6 @@ impl TryFrom<DriveItem> for RemoteItemChange {
         let modified_time =
             parse_time("lastModifiedDateTime").context("failed to get modified time")?;
 
-        if item.root.is_some() {
-            return Ok(Self::RootUpdate {
-                id,
-                created_time,
-                modified_time,
-            });
-        }
-
-        let name = item
-            .name
-            .filter(|name| !name.is_empty())
-            .context("missing name")?;
         let is_directory = match (item.file.is_some(), item.folder.is_some()) {
             (true, false) => false,
             (false, true) => true,
@@ -416,12 +409,17 @@ impl TryFrom<DriveItem> for RemoteItemChange {
         } else {
             *item.size.as_ref().context("missing size")? as u64
         };
-        let parent_id = item
-            .parent_reference
-            .as_ref()
-            .and_then(|v| v.get("id")?.as_str())
-            .context("missing parent id")?
-            .to_owned();
+        // Root actually has a special parent item. Here we ignore it to prevent confusion.
+
+        let parent_id = match item.root {
+            Some(_) => None,
+            None => Some(
+                item.parent_reference
+                    .as_ref()
+                    .and_then(|parent| Some(parent.get("id")?.as_str()?.to_owned()))
+                    .context("missing parent id")?,
+            ),
+        };
         Ok(Self::Update {
             id,
             parent_id,
@@ -452,7 +450,7 @@ impl LocalItemChange {
                         content_type: ContentType::ApplicationJson,
                     },
                     body: RawItemRequest {
-                        folder: Folder {},
+                        folder: EmptySet {},
                         // NB. This does nothing if the target exists and is also a directory.
                         conflict_behavior: ConflictBehavior::Fail,
                         name: name.to_owned(),
