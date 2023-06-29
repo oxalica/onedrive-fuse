@@ -216,6 +216,7 @@ impl InodePool {
         DriveItemField::file,
         DriveItemField::file_system_info,
         DriveItemField::folder,
+        DriveItemField::c_tag,
     ];
 
     pub fn new(_config: Config) -> Self {
