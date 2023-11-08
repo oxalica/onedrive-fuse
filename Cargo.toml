@@ -15,14 +15,14 @@ clap = { version = "4.0.32", features = ["derive"] }
 config = { version = "0.13", default-features = false, features = ["toml"] }
 dirs = "5.0.0"
 env_logger = "0.10.0"
-fuser = "0.12.0"
+fuser = "0.14.0"
 http = "0.2.1"
 humantime = "2.0.1"
 indexmap = "2"
 libc = "0.2.69"
 log = "0.4.8"
 lru-cache = "0.1.2"
-nix = "0.26.1"
+nix = { version = "0.27", features = ["fs", "user"] }
 onedrive-api = "0.9.0"
 open = "5"
 reqwest = "0.11.0"
