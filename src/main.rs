@@ -76,7 +76,7 @@ async fn main_login(opt: OptLogin) -> Result<()> {
 }
 
 fn login_with_http_server(client_id: String, perm: Permission) -> Result<TokenResponse> {
-    use http::StatusCode;
+    use reqwest::StatusCode;
     use std::io::Cursor;
     use tiny_http::{Header, Response, Server};
 

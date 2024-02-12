@@ -1,12 +1,12 @@
 //! Directory hierarchy and item attributes.
 use crate::vfs::error::{Error, Result};
-use http::StatusCode;
 use indexmap::IndexMap;
 use onedrive_api::{
     option::{DriveItemPutOption, ObjectOption},
     resource::{DriveItem, DriveItemField},
     ConflictBehavior, FileName, ItemId, ItemLocation, OneDrive, Tag,
 };
+use reqwest::StatusCode;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
