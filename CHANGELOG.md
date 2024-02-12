@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## 0.2.7 - 2024-02-12
+
 ### Documentation
 
 - Update docs to allow organizational MS accounts. [#10]
