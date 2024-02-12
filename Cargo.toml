@@ -1,6 +1,6 @@
 [package]
 name = "onedrive-fuse"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 repository = "https://github.com/oxalica/onedrive-fuse"
 keywords = ["onedrive", "fuse"]
@@ -12,24 +12,23 @@ license = "GPL-3.0-only"
 anyhow = "1.0.28"
 bytes = "1.0.1"
 clap = { version = "4.0.32", features = ["derive"] }
-config = { version = "0.13", default-features = false, features = ["toml"] }
+config = { version = "0.14", default-features = false, features = ["toml"] }
 dirs = "5.0.0"
-env_logger = "0.10.0"
-fuser = { version = "0.12.0", features = ["abi-7-31"] }
+env_logger = "0.11"
+fuser = { version = "0.14", features = ["abi-7-31"] }
 futures = { version = "0.3.28", default-features = false, features = ["std", "async-await"] }
-http = "0.2.1"
 humantime = "2.0.1"
 humantime-serde = "1.1.1"
-indexmap = "1.6.2"
+indexmap = "2"
 libc = "0.2.69"
 log = "0.4.8"
 lru-cache = "0.1.2"
-nix = "0.26.1"
+nix = { version = "0.27", features = ["fs", "user"] }
 onedrive-api = "0.9.0"
-open = "4.0.1"
+open = "5"
 percent-encoding = "2.3.0"
 reqwest = { version = "0.11.0", features = ["stream"] }
-rusqlite = "0.29.0"
+rusqlite = "0.30"
 sd-notify = "0.4.1"
 serde = { version = "1.0.106", features = ["derive"] }
 serde-aux = "4.2.0"
