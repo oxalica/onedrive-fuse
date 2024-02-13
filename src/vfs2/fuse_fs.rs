@@ -43,7 +43,9 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         name: &OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        let Some(name) = name.to_str() else { return reply.error(libc::ENOENT) };
+        let Some(name) = name.to_str() else {
+            return reply.error(libc::ENOENT);
+        };
         match self.0.lookup(parent_ino, name) {
             Ok((attr, ttl)) => reply.entry(&ttl, &attr, GENERATION),
             Err(err) => reply.error(err.into()),
@@ -241,7 +243,9 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         _umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        let Some(child_name) = child_name.to_str() else { return reply.error(libc::EINVAL) };
+        let Some(child_name) = child_name.to_str() else {
+            return reply.error(libc::EINVAL);
+        };
         match self.0.create_directory(parent_ino, child_name) {
             Ok((ttl, attr)) => reply.entry(&ttl, &attr, GENERATION),
             Err(err) => reply.error(err.into()),

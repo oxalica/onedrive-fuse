@@ -17,7 +17,7 @@ use crate::login::ManagedOnedrive;
 
 const MAX_FETCH_LEN: usize = 1024;
 
-/// https://learn.microsoft.com/en-us/graph/json-batching?view=graph-rest-1.0#batch-size-limitations
+// https://learn.microsoft.com/en-us/graph/json-batching?view=graph-rest-1.0#batch-size-limitations
 const MAX_BATCH_LEN: usize = 20;
 
 const API_BATCH_URL: &str = "https://graph.microsoft.com/v1.0/$batch";
