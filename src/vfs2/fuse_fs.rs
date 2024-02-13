@@ -52,6 +52,10 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         }
     }
 
+    fn forget(&mut self, _req: &Request<'_>, _ino: u64, _nlookup: u64) {}
+
+    fn batch_forget(&mut self, _req: &Request<'_>, _nodes: &[fuser::fuse_forget_one]) {}
+
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
         match self.0.getattr(ino) {
             Ok((attr, ttl)) => reply.attr(&ttl, &attr),

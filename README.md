@@ -106,6 +106,7 @@ Note that you still need to manually [login](#prepare) first.
 ## FUSE features implemented
 
 <details>
+<summary>Default VFS</summary>
 
 - [x] FUSE syscalls
   - [x] Read
@@ -114,7 +115,7 @@ Note that you still need to manually [login](#prepare) first.
     - [x] getattr
     - [x] lookup
     - [x] open
-      - [x] O_RDONLY
+      - [x] `O_RDONLY`
     - [x] opendir
     - [x] read
     - [x] readdir
@@ -125,9 +126,9 @@ Note that you still need to manually [login](#prepare) first.
     - [x] create
     - [x] mkdir
     - [x] open
-      - [x] O_WRONLY/O_RDWR
-      - [x] O_TRUNC
-      - [x] O_EXCL
+      - [x] `O_WRONLY`/`O_RDWR`
+      - [x] `O_TRUNC`
+      - [x] `O_EXCL`
     - [x] rename
     - [x] rmdir
     - [x] setattr
@@ -162,6 +163,70 @@ Note that you still need to manually [login](#prepare) first.
   - [x] File write cache/buffer
 
 </details>
+
+<details>
+<summary>VFS2 (experimental)</summary>
+
+- [ ] FUSE syscalls
+  - [ ] Read
+    - [x] forget
+      - No-op.
+    - [x] getattr
+    - [x] lookup
+    - [x] open
+      - [x] `O_RDONLY`
+    - [x] opendir
+      - No-op.
+      - [ ] `FUSE_NO_OPENDIR_SUPPORT`
+    - [x] read
+    - [x] readdir
+    - [x] readdirplus
+    - [x] release
+    - [x] releasedir
+      - No-op.
+    - [ ] statfs
+  - [ ] Write
+    - [ ] create
+    - [x] mkdir
+    - [ ] open
+      - [ ] `O_WRONLY`/`O_RDWR`
+      - [ ] `O_TRUNC`
+      - [ ] `O_EXCL`
+    - [ ] rename
+    - [ ] rmdir
+    - [ ] setattr
+      - [ ] size
+      - [ ] mtime
+    - [ ] unlink
+    - [ ] write
+  - [x] Misc
+    - destroy
+    - [ ] flush
+    - [x] fsync
+      - Triggers whole filesystem sync.
+    - [x] fsyncdir
+      - Triggers whole filesystem sync.
+    - init
+  - Unsupported
+    - access
+      - [`default_permissions`][fuse-mount-options] is enabled, thus permission
+        check is always done by kernel.
+    - bmap
+    - getlk
+    - getxattr
+    - link
+    - listxattr
+    - mknod
+    - readlink
+    - removexattr
+    - setlk
+    - setxattr
+    - symlink
+
+[fuse-mount-options]: https://www.kernel.org/doc/html/latest/filesystems/fuse.html#mount-options
+
+</details>
+
 
 ## License
 
