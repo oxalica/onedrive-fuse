@@ -515,6 +515,8 @@ impl<B: Backend> Vfs<B> {
         parse_attr(row, &self.permission)
     }
 
+    // Lookup and attributes.
+
     pub fn lookup(&self, parent_ino: u64, child_name: &str) -> Result<(FileAttr, Duration)> {
         Ok(self.conn.query_row(
             r"SELECT * FROM item WHERE parent_ino = ? AND name = ?",
@@ -523,7 +525,7 @@ impl<B: Backend> Vfs<B> {
         )?)
     }
 
-    pub fn getattr(&mut self, ino: u64) -> Result<(FileAttr, Duration)> {
+    pub fn get_attr(&mut self, ino: u64) -> Result<(FileAttr, Duration)> {
         Ok(self
             .conn
             .query_row(r"SELECT * FROM item WHERE ino = ?", params![ino], |row| {
@@ -531,6 +533,37 @@ impl<B: Backend> Vfs<B> {
                 Ok((attr, self.ttl()))
             })?)
     }
+
+    pub fn set_time(
+        &mut self,
+        ino: u64,
+        created_time: Option<SystemTime>,
+        modified_time: Option<SystemTime>,
+    ) -> Result<(Duration, FileAttr)> {
+        assert!(created_time.is_some() || modified_time.is_some());
+
+        let attr = self.conn.query_row(
+            r"
+            UPDATE item SET
+                created_time = COALESCE(:created_time, created_time),
+                modified_time = COALESCE(:modified_time, modified_time),
+                state = 't'
+            WHERE ino = :ino
+            RETURNING *
+            ",
+            named_params! {
+                ":ino": ino,
+                ":created_time": created_time.map(Timestamp::from),
+                ":modified_time": modified_time.map(Timestamp::from),
+            },
+            |row| Ok(parse_attr(row, &self.permission)),
+        )?;
+
+        let ttl = self.ttl();
+        Ok((ttl, attr))
+    }
+
+    // Directory operations.
 
     pub fn read_dir(
         &self,
@@ -558,6 +591,40 @@ impl<B: Backend> Vfs<B> {
         }
         Ok(())
     }
+
+    pub fn create_directory(
+        &mut self,
+        parent_ino: u64,
+        child_name: &str,
+    ) -> Result<(Duration, FileAttr)> {
+        let timestamp = Timestamp::now();
+
+        let attr = self
+            .conn
+            .query_row(
+                r"
+                INSERT
+                INTO item (parent_ino, name, is_directory, size, created_time, modified_time, state)
+                VALUES (:parent_ino, :name, TRUE, 0, :timestamp, :timestamp, 's')
+                ON CONFLICT (parent_ino, name) DO NOTHING
+                RETURNING *
+                ",
+                named_params! {
+                    ":parent_ino": parent_ino,
+                    ":name": child_name,
+                    ":timestamp": timestamp,
+                },
+                |row| Ok(parse_attr(row, &self.permission)),
+            )
+            .optional()?
+            .ok_or(Error::Exists)?;
+
+        // XXX: Should we cache items not uploaded yet?
+        let ttl = Duration::ZERO;
+        Ok((ttl, attr))
+    }
+
+    // File operations.
 
     pub fn open_file(&mut self, ino: u64) -> Result<()> {
         use std::collections::hash_map::Entry;
@@ -649,66 +716,5 @@ impl<B: Backend> Vfs<B> {
                 .context("sync failed")
                 .map_err(Error::Network)
         }
-    }
-
-    pub fn create_directory(
-        &mut self,
-        parent_ino: u64,
-        child_name: &str,
-    ) -> Result<(Duration, FileAttr)> {
-        let timestamp = Timestamp::now();
-
-        let attr = self
-            .conn
-            .query_row(
-                r"
-                INSERT
-                INTO item (parent_ino, name, is_directory, size, created_time, modified_time, state)
-                VALUES (:parent_ino, :name, TRUE, 0, :timestamp, :timestamp, 's')
-                ON CONFLICT (parent_ino, name) DO NOTHING
-                RETURNING *
-                ",
-                named_params! {
-                    ":parent_ino": parent_ino,
-                    ":name": child_name,
-                    ":timestamp": timestamp,
-                },
-                |row| Ok(parse_attr(row, &self.permission)),
-            )
-            .optional()?
-            .ok_or(Error::Exists)?;
-
-        // XXX: Should we cache items not uploaded yet?
-        let ttl = Duration::ZERO;
-        Ok((ttl, attr))
-    }
-
-    pub fn set_time(
-        &mut self,
-        ino: u64,
-        created_time: Option<SystemTime>,
-        modified_time: Option<SystemTime>,
-    ) -> Result<(Duration, FileAttr)> {
-        assert!(created_time.is_some() || modified_time.is_some());
-
-        let attr = self.conn.query_row(
-            r"
-            UPDATE item SET
-                created_time = COALESCE(:created_time, created_time),
-                modified_time = COALESCE(:modified_time, modified_time),
-                state = 't'
-            WHERE ino = :ino
-            RETURNING *
-            ",
-            named_params! {
-                ":ino": ino,
-                ":created_time": created_time.map(Timestamp::from),
-                ":modified_time": modified_time.map(Timestamp::from),
-            },
-            |row| Ok(parse_attr(row, &self.permission)),
-        )?;
-
-        let ttl = self.ttl();
-        Ok((ttl, attr))
     }
 }

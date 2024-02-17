@@ -11,6 +11,8 @@ const GENERATION: u64 = 0;
 pub struct FuseFs<B>(pub Vfs<B>);
 
 impl<B: Backend> fuser::Filesystem for FuseFs<B> {
+    // Entry and exit.
+
     fn init(
         &mut self,
         _req: &Request<'_>,
@@ -36,6 +38,8 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         log::info!("Filesystem destroyed");
     }
 
+    // Lookup and attributes.
+
     fn lookup(
         &mut self,
         _req: &Request<'_>,
@@ -57,11 +61,51 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
     fn batch_forget(&mut self, _req: &Request<'_>, _nodes: &[fuser::fuse_forget_one]) {}
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
-        match self.0.getattr(ino) {
+        match self.0.get_attr(ino) {
             Ok((attr, ttl)) => reply.attr(&ttl, &attr),
             Err(err) => reply.error(err.into()),
         }
     }
+
+    fn setattr(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+        reply: fuser::ReplyAttr,
+    ) {
+        if mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some() {
+            return reply.error(libc::EPERM);
+        }
+        if size.is_some() {
+            // TODO: Truncation.
+            return reply.error(libc::EPERM);
+        }
+        if crtime.is_some() || mtime.is_some() {
+            let mtime = mtime.map(|t| match t {
+                fuser::TimeOrNow::SpecificTime(t) => t,
+                fuser::TimeOrNow::Now => SystemTime::now(),
+            });
+            return match self.0.set_time(ino, crtime, mtime) {
+                Ok((ttl, attr)) => reply.attr(&ttl, &attr),
+                Err(err) => reply.error(err.into()),
+            };
+        }
+        self.getattr(req, ino, reply);
+    }
+
+    // Directory operations.
 
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
         reply.opened(0, 0);
@@ -118,6 +162,37 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         }
     }
 
+    fn fsyncdir(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        self.fsync(req, ino, fh, datasync, reply);
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent_ino: u64,
+        child_name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        let Some(child_name) = child_name.to_str() else {
+            return reply.error(libc::EINVAL);
+        };
+        match self.0.create_directory(parent_ino, child_name) {
+            Ok((ttl, attr)) => reply.entry(&ttl, &attr, GENERATION),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    // File operations.
+
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         let flags = (flags as u32) & (!libc::S_IFMT);
         // TODO: Write support.
@@ -172,17 +247,6 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         }
     }
 
-    fn fsyncdir(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        datasync: bool,
-        reply: fuser::ReplyEmpty,
-    ) {
-        self.fsync(req, ino, fh, datasync, reply);
-    }
-
     fn fsync(
         &mut self,
         _req: &Request<'_>,
@@ -198,61 +262,5 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
                 Err(err) => reply.error(err.into()),
             }
         });
-    }
-
-    fn setattr(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        _atime: Option<fuser::TimeOrNow>,
-        mtime: Option<fuser::TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
-        crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        flags: Option<u32>,
-        reply: fuser::ReplyAttr,
-    ) {
-        if mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some() {
-            return reply.error(libc::EPERM);
-        }
-        if size.is_some() {
-            // TODO: Truncation.
-            return reply.error(libc::EPERM);
-        }
-        if crtime.is_some() || mtime.is_some() {
-            let mtime = mtime.map(|t| match t {
-                fuser::TimeOrNow::SpecificTime(t) => t,
-                fuser::TimeOrNow::Now => SystemTime::now(),
-            });
-            return match self.0.set_time(ino, crtime, mtime) {
-                Ok((ttl, attr)) => reply.attr(&ttl, &attr),
-                Err(err) => reply.error(err.into()),
-            };
-        }
-        self.getattr(req, ino, reply);
-    }
-
-    fn mkdir(
-        &mut self,
-        _req: &Request<'_>,
-        parent_ino: u64,
-        child_name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        reply: fuser::ReplyEntry,
-    ) {
-        let Some(child_name) = child_name.to_str() else {
-            return reply.error(libc::EINVAL);
-        };
-        match self.0.create_directory(parent_ino, child_name) {
-            Ok((ttl, attr)) => reply.entry(&ttl, &attr, GENERATION),
-            Err(err) => reply.error(err.into()),
-        }
     }
 }
