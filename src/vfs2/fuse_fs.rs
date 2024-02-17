@@ -3,6 +3,7 @@ use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
 use fuser::{consts, Request};
+use nix::fcntl::OFlag;
 
 use super::{Backend, Vfs};
 
@@ -86,11 +87,11 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
         reply: fuser::ReplyAttr,
     ) {
         if mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some() {
-            return reply.error(libc::EPERM);
+            return reply.error(libc::EOPNOTSUPP);
         }
         if size.is_some() {
             // TODO: Truncation.
-            return reply.error(libc::EPERM);
+            return reply.error(libc::EOPNOTSUPP);
         }
         if crtime.is_some() || mtime.is_some() {
             let mtime = mtime.map(|t| match t {
@@ -194,15 +195,21 @@ impl<B: Backend> fuser::Filesystem for FuseFs<B> {
     // File operations.
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
-        let flags = (flags as u32) & (!libc::S_IFMT);
-        // TODO: Write support.
-        if flags != 0 {
-            return reply.error(libc::EPERM);
-        }
-        match self.0.open_file(ino) {
-            // Keep cache between `open` as long as the generation of the inode unchanged.
-            Ok(()) => reply.opened(0, consts::FOPEN_NONSEEKABLE | consts::FOPEN_KEEP_CACHE),
-            Err(err) => reply.error(err.into()),
+        const SUPPORTED_FLAGS: OFlag = OFlag::O_LARGEFILE.union(OFlag::O_ACCMODE);
+
+        let Some(flags) = OFlag::from_bits(flags).filter(|&f| SUPPORTED_FLAGS.contains(f)) else {
+            return reply.error(libc::EOPNOTSUPP);
+        };
+        match flags & OFlag::O_ACCMODE {
+            OFlag::O_RDONLY => {
+                match self.0.open_file(ino) {
+                    // Keep cache between `open` as long as the generation of the inode unchanged.
+                    Ok(()) => reply.opened(0, consts::FOPEN_NONSEEKABLE | consts::FOPEN_KEEP_CACHE),
+                    Err(err) => reply.error(err.into()),
+                }
+            }
+            // TODO: Write support.
+            _ => reply.error(libc::EOPNOTSUPP),
         }
     }
 
