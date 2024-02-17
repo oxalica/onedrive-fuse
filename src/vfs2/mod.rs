@@ -10,9 +10,7 @@ use fuser::{FileAttr, FileType};
 use futures::future::Either;
 use futures::{AsyncRead, AsyncReadExt, Future, StreamExt};
 use nix::errno::Errno;
-use rusqlite::{
-    named_params, params, types, Connection, DropBehavior, OptionalExtension, TransactionBehavior,
-};
+use rusqlite::{named_params, params, types, Connection, OptionalExtension, TransactionBehavior};
 
 mod backend;
 mod fuse_fs;
@@ -70,6 +68,7 @@ impl From<Error> for i32 {
 }
 
 impl From<rusqlite::Error> for Error {
+    #[track_caller]
     fn from(err: rusqlite::Error) -> Self {
         if let rusqlite::Error::QueryReturnedNoRows = err {
             return Self::NotFound;
@@ -176,60 +175,55 @@ impl<B> Drop for Vfs<B> {
 }
 
 struct RemoteChangeCommitter<'conn> {
-    update_stmt: rusqlite::Statement<'conn>,
-    delete_stmt: rusqlite::Statement<'conn>,
-    clear_dirty_time_stmt: rusqlite::Statement<'conn>,
+    upsert_item_stmt: rusqlite::Statement<'conn>,
+    delete_item_stmt: rusqlite::Statement<'conn>,
 }
 
 impl<'conn> RemoteChangeCommitter<'conn> {
     fn new(conn: &'conn rusqlite::Connection) -> rusqlite::Result<Self> {
-        let update_stmt = conn.prepare(
+        let upsert_item_stmt = conn.prepare(
             r"
             INSERT INTO item
-            (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
-            SELECT :ino, :id, :is_directory, ino, :name, :size, :created_time, :modified_time
-            FROM item
-            WHERE id = :parent_id AND is_directory
-            -- Remote item update.
+            (id, parent_ino, name, is_directory, size, created_time, modified_time, state)
+            SELECT :id, parent_item.ino, :name, :is_directory, :size, :created_time, :modified_time, 's'
+            FROM item AS parent_item
+            WHERE parent_item.id = :parent_id AND parent_item.is_directory
+            -- Update of an existing item.
             ON CONFLICT (id) DO UPDATE
             SET
-                name = :name,
-                size = :size,
-                is_directory = :is_directory,
                 parent_ino = excluded.parent_ino,
+                name = :name,
+                is_directory = :is_directory,
+                size = :size,
                 created_time = :created_time,
-                modified_time = :modified_time
-            -- Pushed new items.
+                modified_time = :modified_time,
+                -- Clear time dirty iff this is the result of what we are committing.
+                state = IIF(state == 'c', 's', state)
+            -- A new item replacing an existing path, or a newly committed local item.
             ON CONFLICT (parent_ino, name) DO UPDATE
             SET
                 id = :id,
-                size = :size,
                 is_directory = :is_directory,
+                size = :size,
                 created_time = :created_time,
-                modified_time = :modified_time
-            RETURNING ino
+                modified_time = :modified_time,
+                -- Clear time dirty iff this is the result of what we are committing.
+                state = IIF(state == 'c', 's', state)
             ",
         )?;
-        let delete_stmt = conn.prepare(
+        let delete_item_stmt = conn.prepare(
             r"
             DELETE FROM item
             WHERE id = :id
             ",
         )?;
-        let clear_dirty_time_stmt = conn.prepare(
-            r"
-            DELETE FROM dirty_item
-            WHERE ino = :ino
-            ",
-        )?;
         Ok(Self {
-            update_stmt,
-            delete_stmt,
-            clear_dirty_time_stmt,
+            upsert_item_stmt,
+            delete_item_stmt,
         })
     }
 
-    fn execute(&mut self, change: &RemoteItemChange, clear_dirty: bool) -> rusqlite::Result<()> {
+    fn apply(&mut self, change: &RemoteItemChange) -> rusqlite::Result<()> {
         match change {
             RemoteItemChange::Update {
                 id,
@@ -240,29 +234,18 @@ impl<'conn> RemoteChangeCommitter<'conn> {
                 created_time,
                 modified_time,
             } => {
-                let ino = self
-                    .update_stmt
-                    .query_row(
-                        named_params! {
-                            ":id": id,
-                            ":parent_id": parent_id,
-                            ":name": name,
-                            ":is_directory": is_directory,
-                            ":size": size,
-                            ":created_time": Timestamp::from(*created_time),
-                            ":modified_time": Timestamp::from(*modified_time),
-                        },
-                        |row| row.get::<_, u64>(0),
-                    )
-                    .optional()?;
-                if let (Some(ino), true) = (ino, clear_dirty) {
-                    self.clear_dirty_time_stmt.execute(named_params! {
-                        ":ino": ino,
-                    })?;
-                }
+                self.upsert_item_stmt.execute(named_params! {
+                    ":id": id,
+                    ":parent_id": parent_id,
+                    ":name": name,
+                    ":is_directory": is_directory,
+                    ":size": size,
+                    ":created_time": Timestamp::from(*created_time),
+                    ":modified_time": Timestamp::from(*modified_time),
+                })?;
             }
             RemoteItemChange::Delete { id } => {
-                self.delete_stmt.execute(named_params! {
+                self.delete_item_stmt.execute(named_params! {
                     ":id": id,
                 })?;
             }
@@ -354,71 +337,53 @@ impl<B: Backend> Vfs<B> {
     }
 
     async fn push_local_changes(conn: &mut Connection, backend: &B) -> anyhow::Result<usize> {
-        let mut txn = conn.transaction()?;
-
-        // If some requests failed, still commit the success ones.
-        txn.set_drop_behavior(DropBehavior::Commit);
-
-        let max_len = backend.max_push_len();
-        let changes = txn
-            .prepare(
+        let changes = {
+            let txn = conn.transaction()?;
+            let max_len = backend.max_push_len();
+            let mut inos = Vec::new();
+            let changes = txn
+                .prepare(
+                    r"
+                    SELECT ino, id, child_path, created_time, modified_time
+                    FROM updates
+                    LIMIT ?
+                    ",
+                )?
+                .query_and_then(params![max_len], |row| {
+                    let ino = row.get::<_, u64>(0)?;
+                    let id = row.get::<_, String>(1)?;
+                    let child_path = row.get::<_, Option<String>>(2)?;
+                    let created_time = row.get::<_, Timestamp>(3)?.into();
+                    let modified_time = row.get::<_, Timestamp>(4)?.into();
+                    inos.push(ino);
+                    Ok(match child_path {
+                        Some(child_path) => LocalItemChange::CreateDirectory {
+                            parent_id: id,
+                            child_path,
+                            created_time,
+                            modified_time,
+                        },
+                        None => LocalItemChange::UpdateTime {
+                            id,
+                            created_time,
+                            modified_time,
+                        },
+                    })
+                })?
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let mut stmt = txn.prepare(
                 r"
-                WITH RECURSIVE
-                    new_dir(ino, parent_id, child_path, created_time, modified_time) AS (
-                        SELECT
-                            item.ino,
-                            parent.id,
-                            '/' || item.name,
-                            item.created_time,
-                            item.modified_time
-                        FROM item
-                        JOIN item AS parent ON parent.ino = item.parent_ino AND
-                            parent.id IS NOT NULL
-                        WHERE item.id IS NULL
-
-                        UNION ALL
-                        SELECT
-                            item.ino,
-                            parent_id,
-                            child_path || '/' || item.name,
-                            item.created_time,
-                            item.modified_time
-                        FROM new_dir
-                        JOIN item ON item.parent_ino = new_dir.ino
-                        WHERE item.id IS NULL
-                    )
-                SELECT parent_id, child_path, created_time, modified_time
-                FROM new_dir
-
-                UNION ALL
-                SELECT id, NULL, created_time, modified_time
-                FROM dirty_item
-                JOIN item USING (ino)
-                WHERE id IS NOT NULL
-
-                LIMIT ?
+                UPDATE item SET state = 'c'
+                WHERE ino == ? AND state == 't'
                 ",
-            )?
-            .query_and_then(params![max_len], |row| {
-                let id = row.get::<_, String>(0)?;
-                let child_path = row.get::<_, Option<String>>(1)?;
-                let created_time = row.get::<_, Timestamp>(2)?.into();
-                let modified_time = row.get::<_, Timestamp>(3)?.into();
-                Ok(match child_path {
-                    Some(child_path) => LocalItemChange::CreateDirectory {
-                        parent_id: id,
-                        child_path,
-                        created_time,
-                        modified_time,
-                    },
-                    None => LocalItemChange::UpdateTime {
-                        id,
-                        created_time,
-                        modified_time,
-                    },
-                })
-            })?
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            )?;
+            for &ino in &inos {
+                stmt.execute([ino])?;
+            }
+            drop(stmt);
+            txn.commit()?;
+            changes
+        };
 
         // Fast path.
         if changes.is_empty() {
@@ -429,15 +394,17 @@ impl<B: Backend> Vfs<B> {
         let responses_len = responses.len();
         ensure!(responses_len != 0, "no response");
         {
+            let txn = conn.transaction()?;
             let mut committer = RemoteChangeCommitter::new(&txn)?;
             for ret in responses {
                 // TODO: Make this fail-safe.
-                committer.execute(&ret?, true)?;
+                committer.apply(&ret?)?;
             }
+            drop(committer);
+            txn.commit()?;
         }
         log::info!("Pushed {responses_len} local changes");
 
-        txn.commit()?;
         Ok(responses_len)
     }
 
@@ -482,8 +449,8 @@ impl<B: Backend> Vfs<B> {
                     txn.execute(
                         r"
                         INSERT INTO item
-                        (ino, id, is_directory, parent_ino, name, size, created_time, modified_time)
-                        VALUES (1, :id, TRUE, NULL, :name, 0, :created_time, :modified_time)
+                        (ino, id, parent_ino, name, is_directory, size, created_time, modified_time, state)
+                        VALUES (1, :id, NULL, :name, TRUE, 0, :created_time, :modified_time, 's')
                         ",
                         named_params! {
                             ":id": id,
@@ -513,7 +480,7 @@ impl<B: Backend> Vfs<B> {
                 }
 
                 // TODO: Handle conflicts.
-                committer.execute(&change, false)?;
+                committer.apply(&change)?;
             }
         };
         if change_cnt != 0 {
@@ -691,43 +658,28 @@ impl<B: Backend> Vfs<B> {
     ) -> Result<(Duration, FileAttr)> {
         let timestamp = Timestamp::now();
 
-        let changed = self.conn.execute(
-            r"
-            INSERT OR IGNORE
-            INTO item (id, is_directory, parent_ino, name, size, created_time, modified_time)
-            VALUES (NULL, TRUE, :parent_ino, :name, 0, :timestamp, :timestamp)
-            ",
-            named_params! {
-                ":parent_ino": parent_ino,
-                ":name": child_name,
-                ":timestamp": timestamp,
-            },
-        )?;
-        if changed == 0 {
-            return Err(Error::Exists);
-        }
-        let ino = self.conn.last_insert_rowid() as u64;
+        let attr = self
+            .conn
+            .query_row(
+                r"
+                INSERT
+                INTO item (parent_ino, name, is_directory, size, created_time, modified_time, state)
+                VALUES (:parent_ino, :name, TRUE, 0, :timestamp, :timestamp, 's')
+                ON CONFLICT (parent_ino, name) DO NOTHING
+                RETURNING *
+                ",
+                named_params! {
+                    ":parent_ino": parent_ino,
+                    ":name": child_name,
+                    ":timestamp": timestamp,
+                },
+                |row| Ok(parse_attr(row, &self.permission)),
+            )
+            .optional()?
+            .ok_or(Error::Exists)?;
 
         // XXX: Should we cache items not uploaded yet?
         let ttl = Duration::ZERO;
-        let time = timestamp.into();
-        let attr = FileAttr {
-            ino,
-            size: 0,
-            blocks: 0,
-            atime: time,
-            mtime: time,
-            ctime: time,
-            crtime: time,
-            kind: FileType::Directory,
-            perm: self.permission.dir_permission() as _,
-            nlink: 1,
-            uid: self.permission.uid,
-            gid: self.permission.gid,
-            rdev: 0,
-            blksize: BLOCK_SIZE,
-            flags: 0,
-        };
         Ok((ttl, attr))
     }
 
@@ -739,12 +691,12 @@ impl<B: Backend> Vfs<B> {
     ) -> Result<(Duration, FileAttr)> {
         assert!(created_time.is_some() || modified_time.is_some());
 
-        let txn = self.conn.transaction()?;
-        let (has_id, attr) = txn.query_row(
+        let attr = self.conn.query_row(
             r"
             UPDATE item SET
                 created_time = COALESCE(:created_time, created_time),
-                modified_time = COALESCE(:modified_time, modified_time)
+                modified_time = COALESCE(:modified_time, modified_time),
+                state = 't'
             WHERE ino = :ino
             RETURNING *
             ",
@@ -753,22 +705,8 @@ impl<B: Backend> Vfs<B> {
                 ":created_time": created_time.map(Timestamp::from),
                 ":modified_time": modified_time.map(Timestamp::from),
             },
-            |row| {
-                let has_id = row.get_ref("id")? != types::ValueRef::Null;
-                let attr = parse_attr(row, &self.permission);
-                Ok((has_id, attr))
-            },
+            |row| Ok(parse_attr(row, &self.permission)),
         )?;
-        // Only set it dirty if it is fresh on remote side currently.
-        if has_id {
-            txn.execute(
-                r"
-                INSERT OR IGNORE INTO dirty_item (ino) VALUES (?)
-                ",
-                params![ino],
-            )?;
-        }
-        txn.commit()?;
 
         let ttl = self.ttl();
         Ok((ttl, attr))
