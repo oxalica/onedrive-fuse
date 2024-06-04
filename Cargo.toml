@@ -7,6 +7,7 @@ keywords = ["onedrive", "fuse"]
 description = "Mount OneDrive storage as FUSE filesystem"
 readme = "README.md"
 license = "GPL-3.0-only"
+exclude = ["doc"]
 
 [dependencies]
 anyhow = "1.0.28"
