@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+### Fixes
+
+- Login now uses consumer-tenant API thus should support Apps targeting
+  only consumers.
+
+### Internal
+
+- Update vulnurable dependencies.
+
 ## 0.2.7 - 2024-02-12
 
 ### Documentation

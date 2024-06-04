@@ -1,6 +1,6 @@
 use crate::config::de_duration_sec;
 use anyhow::{ensure, Context as _, Result};
-use onedrive_api::{Auth, DriveLocation, OneDrive, Permission};
+use onedrive_api::{Auth, ClientCredential, DriveLocation, OneDrive, Permission, Tenant};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -50,9 +50,10 @@ impl ManagedOnedrive {
                 .write(!cred.readonly)
                 .offline_access(true),
             cred.redirect_uri.clone(),
+            Tenant::Consumers,
         );
         let resp = auth
-            .login_with_refresh_token(&cred.refresh_token, None)
+            .login_with_refresh_token(&cred.refresh_token, &ClientCredential::None)
             .await?;
         log::info!(
             "Logined. Token will be expired in {} s.",
@@ -114,7 +115,7 @@ impl ManagedOnedrive {
 
             log::info!("Relogining...");
             let resp = match auth
-                .login_with_refresh_token(&cred.refresh_token, None)
+                .login_with_refresh_token(&cred.refresh_token, &ClientCredential::None)
                 .await
             {
                 Err(err) => {

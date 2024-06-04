@@ -2,7 +2,7 @@ use crate::login::ManagedOnedrive;
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Args, Parser};
 use fuser::MountOption;
-use onedrive_api::{Auth, Permission, TokenResponse};
+use onedrive_api::{Auth, ClientCredential, Permission, Tenant, TokenResponse};
 use std::path::PathBuf;
 use url::Url;
 
@@ -52,11 +52,16 @@ async fn main_login(opt: OptLogin) -> Result<()> {
 
     let tokens = if let Some(code) = &opt.code {
         eprintln!("Logining...");
-        let auth = Auth::new(opt.client_id.clone(), perm, REDIRECT_URI.to_owned());
-        auth.login_with_code(code, None).await?
+        let auth = Auth::new(
+            opt.client_id.clone(),
+            perm,
+            REDIRECT_URI.to_owned(),
+            Tenant::Consumers,
+        );
+        auth.login_with_code(code, &ClientCredential::None).await?
     } else {
         let client_id = opt.client_id.clone();
-        tokio::task::spawn_blocking(|| login_with_http_server(client_id, perm)).await??
+        tokio::task::spawn_blocking(move || login_with_http_server(client_id, perm)).await??
     };
 
     let refresh_token = tokens.refresh_token.expect("Missing refresh token");
@@ -91,10 +96,10 @@ fn login_with_http_server(client_id: String, perm: Permission) -> Result<TokenRe
         listen_addr.port(),
         HTTP_SERVER_PATH
     );
-    let auth = Auth::new(client_id, perm, redirect_uri);
+    let auth = Auth::new(client_id, perm, redirect_uri, Tenant::Consumers);
     let auth_url = auth.code_auth_url();
 
-    let _ = open::that(&auth_url);
+    let _ = open::that(auth_url.as_str());
     eprintln!(
         "\
 Please login to your OneDrive (Microsoft) Account in browser.
@@ -122,8 +127,8 @@ Your browser should be opened with the login page. If not, please manually open 
                 .find_map(|(key, value)| (key == "code" && !value.is_empty()).then_some(value))
                 .context("Missing code")?;
             eprintln!("Logining...");
-            let tokens =
-                tokio::runtime::Handle::current().block_on(auth.login_with_code(&code, None))?;
+            let tokens = tokio::runtime::Handle::current()
+                .block_on(auth.login_with_code(&code, &ClientCredential::None))?;
             Ok(tokens)
         })();
         let headers =
