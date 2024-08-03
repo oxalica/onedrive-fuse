@@ -9,19 +9,24 @@ Mount [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
 
 ## Installation
 
-*Note: For Nix users, the program is already packaged via Nix Flake in `flake.nix`.*
+_Note: For Nix users, the program is already packaged via Nix Flake in `flake.nix`._
 
 1.  Use your package manager to install these dependencies:
     - pkg-config
     - openssl
-    - fuse (libfuse)
+    - fuse (libfuse)  
+
+1.  On Debian 12 (and other distro's) you may need to also install the following to resolve missing files:
+    - libssl-dev
+    - libfuse3-dev  
+
+1.  If your rustc version isn't 1.65, and you don't mind not using the official repos, you can install it from here [Rust's official site](https://rustup.rs).
 
 1.  Compile and install the program from crates.io:
 
     ```
     $ cargo install onedrive-fuse
     ```
-
 ## Prepare
 
 1.  For the first time, you should register your own Application (Client) ID for the API access.
@@ -35,6 +40,7 @@ Mount [Microsoft OneDrive][onedrive] storage as [FUSE] filesystem.
     ```
 
     If you want read-write access, you should instead run,
+
     ```
     $ onedrive-fuse login --read-write --client-id <paste-your-client-id-here>
     ```
