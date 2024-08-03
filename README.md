@@ -14,21 +14,19 @@ _Note: For Nix users, the program is already packaged via Nix Flake in `flake.ni
 1.  Use your package manager to install these dependencies:
     - pkg-config
     - openssl
-    - fuse (libfuse)
-2.  On Debian 12 you may need to also install the following to resolve missing files:
+    - fuse (libfuse)  
 
+1.  On Debian 12 (and other distro's) you may need to also install the following to resolve missing files:
     - libssl-dev
-    - libfuse3-dev
+    - libfuse3-dev  
 
-3.  Compile and install the program from crates.io:
+1.  If your rustc version isn't 1.65, and you don't mind not using the official repos, you can install it from here [Rust's official site](https://rustup.rs).
+
+1.  Compile and install the program from crates.io:
 
     ```
     $ cargo install onedrive-fuse
     ```
-
-4.  If your rustc version isn't 1.65, and you don't mind not using the official repos, you can install it from here:
-    $ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
 ## Prepare
 
 1.  For the first time, you should register your own Application (Client) ID for the API access.
