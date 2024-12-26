@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "onedrive-fuse"
-version = "0.2.8"
+version = "0.2.9+deprecated"
 dependencies = [
  "anyhow",
  "bytes",

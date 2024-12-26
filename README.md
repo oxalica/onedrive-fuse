@@ -1,3 +1,5 @@
+### !! This project is unmaintained and deprecated. Please check out [rclone](https://github.com/rclone/rclone) instead. !!
+
 # onedrive-fuse
 
 [![crates.io](https://img.shields.io/crates/v/onedrive-fuse.svg)](https://crates.io/crates/onedrive-fuse)
